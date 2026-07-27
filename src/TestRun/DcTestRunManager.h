@@ -75,6 +75,13 @@ public:
     // no-runs / ambiguous / not-found.
     bool Stop(std::string const& selector, std::string* msg);
 
+    // Resolve the selector to ONE run's leader tank, for `.dc test watch` — the
+    // GM camera needs a single seat, so "all" and a bare selector with several
+    // runs live are both refused with the run list in *msg (same selector
+    // grammar and messages as Stop, minus the fan-out).
+    bool WatchTarget(std::string const& selector, ObjectGuid* tankOut,
+                     std::string* msg) const;
+
     std::string StatusText() const;
     bool IsActive() const { return !_runs.empty(); }
 

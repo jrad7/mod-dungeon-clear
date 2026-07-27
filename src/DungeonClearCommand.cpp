@@ -16,9 +16,14 @@
 #include "Chat.h"
 #include "ChatCommand.h"
 #include "Group.h"
+#include "InstanceSaveMgr.h"
+#include "Map.h"
+#include "ObjectAccessor.h"
 #include "Player.h"
 #include "StringFormat.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <sstream>
@@ -121,11 +126,16 @@ namespace
         return true;
     }
 
-    // Spectator free-camera toggle. Acts on the ISSUER directly (session
-    // plumbing, not bot behavior) — it must NOT go through DispatchToTankBots
-    // or the action pipeline: the issuer may not even be the tank, and the
-    // possession belongs to their session alone. See Util/DcSpectator.h.
-    bool HandleSpectate(ChatHandler* handler)
+    // Spectator camera toggle. Acts on the ISSUER directly (session plumbing,
+    // not bot behavior) — it must NOT go through DispatchToTankBots or the
+    // action pipeline: the issuer may not even be the tank, and the camera
+    // belongs to their session alone. See Util/DcSpectator.h.
+    //
+    // Bare `.dc spectate` is the free-flying camera; `.dc spectate follow
+    // [name]` rides a bot instead. Neither needs a group — that gate lives only
+    // in the addon's party-channel transport, which is why a GM watching from
+    // outside the party has to type the command.
+    bool HandleSpectate(ChatHandler* handler, Optional<std::string> param)
     {
         Player* issuer = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
         if (!issuer)
@@ -134,7 +144,43 @@ namespace
             return true;
         }
 
+        std::string arg = param ? *param : "";
+        std::string sub;
+        std::string name;
+        {
+            std::istringstream in(arg);
+            in >> sub >> name;
+        }
+        std::transform(sub.begin(), sub.end(), sub.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
         std::string whyNot;
+        if (sub == "follow")
+        {
+            // An explicit name picks the seat; without one the camera resolves
+            // the run's driving tank on this map.
+            Player* target = nullptr;
+            if (!name.empty())
+            {
+                target = ObjectAccessor::FindPlayerByName(name, false);
+                if (!target)
+                {
+                    handler->PSendSysMessage("No player named '{}' is online.", name);
+                    return true;
+                }
+            }
+
+            if (!DcSpectator::ToggleFollow(issuer, target, &whyNot))
+                handler->SendSysMessage(whyNot);
+            return true;
+        }
+
+        if (!sub.empty() && sub != "free")
+        {
+            handler->SendSysMessage("Usage: .dc spectate [follow [name]]");
+            return true;
+        }
+
         if (!DcSpectator::Toggle(issuer, &whyNot))
             handler->SendSysMessage(whyNot);
         return true;
@@ -163,6 +209,8 @@ public:
             { "status", HandleTestStatus, SEC_GAMEMASTER, Console::Yes },
             { "stop",   HandleTestStop,   SEC_GAMEMASTER, Console::Yes },
             { "list",   HandleTestList,   SEC_GAMEMASTER, Console::Yes },
+            // Console::No — a camera needs a session to attach to.
+            { "watch",  HandleTestWatch,  SEC_GAMEMASTER, Console::No },
             { "plan",   dcTestPlanTable },
         };
         static ChatCommandTable dcTable =
@@ -275,6 +323,115 @@ public:
         std::string msg;
         DcTestRunManager::Instance().Stop(std::string(selector), &msg);
         handler->SendSysMessage(msg);
+        return true;
+    }
+
+    // `.dc test watch [selector]` — put the GM's camera on a running test.
+    //
+    // This is the one-command answer to "let me watch a run": the GM is NOT in
+    // the bot party (by design — see DcTestRunManager), so watching used to
+    // mean hand-running `.appear <botname>` then `.dc spectate`, and the addon
+    // button refuses outright because its transport is the party channel.
+    //
+    // Sequence: hide the GM (mobs must not aggro the watcher and corrupt the
+    // run), bind + teleport into the run's instance, and arm the follow camera
+    // to start on arrival — the teleport is asynchronous, and the teleport
+    // teardown hook deliberately stops any live camera on the way out, so the
+    // camera cannot be started here. `.dc test watch off` ends it and puts the
+    // GM's own visibility back.
+    static bool HandleTestWatch(ChatHandler* handler, Tail selectorArg)
+    {
+        Player* gm = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
+        if (!gm)
+        {
+            handler->SendSysMessage("This command must be used in-game.");
+            return true;
+        }
+
+        std::string selector(selectorArg);
+        if (selector == "off" || selector == "stop")
+        {
+            // Unconditional: Stop also disarms a request that is still waiting
+            // out a loading screen, which IsActive can't see. It announces on
+            // its own when a camera was actually running.
+            bool const wasActive = DcSpectator::IsActive(gm);
+            DcSpectator::Stop(gm);
+            if (!wasActive)
+                handler->SendSysMessage("No spectator camera running (any pending watch request is cancelled).");
+            return true;
+        }
+
+        ObjectGuid tankGuid;
+        std::string msg;
+        if (!DcTestRunManager::Instance().WatchTarget(selector, &tankGuid, &msg))
+        {
+            handler->SendSysMessage(msg);
+            return true;
+        }
+
+        Player* tank = ObjectAccessor::FindConnectedPlayer(tankGuid);
+        if (!tank || !tank->IsInWorld())
+        {
+            handler->SendSysMessage("That run's tank isn't in the world yet — try again in a moment.");
+            return true;
+        }
+
+        handler->PSendSysMessage("Watching {}", msg);
+
+        // Already standing in the run's instance: nothing to teleport, just
+        // take the seat.
+        if (gm->IsInWorld() && gm->GetMap() == tank->GetMap())
+        {
+            std::string whyNot;
+            if (!DcSpectator::StartFollow(gm, tank, &whyNot))
+                handler->SendSysMessage(whyNot);
+            return true;
+        }
+
+        // Hide the watcher before they land. A visible, targetable GM in the
+        // instance pulls aggro and invalidates the very run being observed.
+        // DcSpectator::Stop restores this exactly when we were the ones to
+        // change it.
+        bool const gmModeApplied = !gm->IsGameMaster();
+        if (gmModeApplied)
+        {
+            gm->SetGameMaster(true);
+            handler->SendSysMessage("GM mode enabled so the run doesn't see you (restored when you stop).");
+        }
+
+        // Instance bind + difficulty, mirroring the core's `.appear` path
+        // (cs_misc.cpp): without the bind the teleport drops the GM into a
+        // fresh instance of the map instead of the run's.
+        Map* tankMap = tank->GetMap();
+        InstancePlayerBind* bind = sInstanceSaveMgr->PlayerGetBoundInstance(
+            gm->GetGUID(), tank->GetMapId(), tank->GetDifficulty(tankMap->IsRaid()));
+        if (!bind)
+        {
+            if (InstanceSave* save = sInstanceSaveMgr->GetInstanceSave(tank->GetInstanceId()))
+                sInstanceSaveMgr->PlayerBindToInstance(gm->GetGUID(), save, !save->CanReset(), gm);
+        }
+
+        if (tankMap->IsRaid())
+            gm->SetRaidDifficulty(tank->GetRaidDifficulty());
+        else
+            gm->SetDungeonDifficulty(tank->GetDungeonDifficulty());
+
+        gm->SaveRecallPosition();   // `.recall` gets the GM back out
+
+        // Arm the camera AFTER the teleport call, never before: TeleportTo
+        // fires PLAYERHOOK_ON_BEFORE_TELEPORT synchronously, and that hook
+        // calls DcSpectator::Stop — which disarms pending requests. Arming
+        // first would have the teleport immediately cancel its own camera.
+        if (!gm->TeleportTo(tank->GetMapId(), tank->GetPositionX(), tank->GetPositionY(),
+                            tank->GetPositionZ(), tank->GetOrientation()))
+        {
+            if (gmModeApplied)
+                gm->SetGameMaster(false);
+            handler->SendSysMessage("Teleport into the run's instance was refused.");
+            return true;
+        }
+
+        DcSpectator::RequestFollowOnArrival(gm, tankGuid, gmModeApplied);
         return true;
     }
 

@@ -158,6 +158,11 @@ public:
 // Closing half of the mover window — see DungeonClearSpectatorMoverBeginScript
 // for the full story. NOT registered in AddSC_dungeon_clear_module(): it must
 // be instantiated on the first world tick so it sorts after playerbots' hook.
+//
+// This is also where the spectator camera's own slow tick runs (pending-arrival
+// start + follow-target re-resolution). It must sit AFTER the window closes,
+// never between Begin and End: the tick can Stop a live camera, and tearing a
+// possession down inside the bracket would leave the mover swap half-applied.
 class DungeonClearSpectatorMoverEndScript : public PlayerScript
 {
 public:
@@ -166,9 +171,10 @@ public:
             PLAYERHOOK_ON_AFTER_UPDATE
         }) {}
 
-    void OnPlayerAfterUpdate(Player* player, uint32 /*p_time*/) override
+    void OnPlayerAfterUpdate(Player* player, uint32 p_time) override
     {
         DcSpectator::EndBotAiMoverWindow(player);
+        DcSpectator::Tick(player, p_time);
     }
 };
 
@@ -325,9 +331,17 @@ public:
 
     // Despawn the dummy before the session goes away; never let the
     // TempSummon outlive its possessor.
+    //
+    // The second call is the crash guard for the OTHER side of a follow
+    // camera: this hook fires for every logging-out player, bots included
+    // (PlayerbotHolder::LogoutPlayerBot -> WorldSession::LogoutPlayer, whose
+    // very first act is this hook), and a watched bot that is deleted without
+    // clearing its viewers leaves their m_seer dangling. See
+    // DcSpectator::NotifyWatchedLoggingOut.
     void OnPlayerBeforeLogout(Player* player) override
     {
         DcSpectator::Stop(player);
+        DcSpectator::NotifyWatchedLoggingOut(player);
     }
 };
 

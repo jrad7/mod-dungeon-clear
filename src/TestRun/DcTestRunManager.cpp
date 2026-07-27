@@ -117,6 +117,53 @@ bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
     return true;
 }
 
+bool DcTestRunManager::WatchTarget(std::string const& selector, ObjectGuid* tankOut,
+                                   std::string* msg) const
+{
+    std::vector<DcTestRunSelect::RunRef> refs;
+    refs.reserve(_runs.size());
+    for (auto const& job : _runs)
+        refs.push_back({job->RunId(), job->DungeonToken()});
+
+    DcTestRunSelect::Result const res = DcTestRunSelect::Resolve(selector, refs);
+    switch (res.kind)
+    {
+        case DcTestRunSelect::Kind::NoRuns:
+            if (msg)
+                *msg = "no test run active";
+            return false;
+        case DcTestRunSelect::Kind::Ambiguous:
+            if (msg)
+                *msg = "multiple test runs active — specify a runId or dungeon token:\n" +
+                       ListActiveRuns();
+            return false;
+        case DcTestRunSelect::Kind::NotFound:
+            if (msg)
+                *msg = "no run matches '" + selector + "' — active runs:\n" + ListActiveRuns();
+            return false;
+        case DcTestRunSelect::Kind::All:
+        case DcTestRunSelect::Kind::Matched:
+            break;
+    }
+
+    // A camera can only sit in one instance. "all", or a token matching several
+    // runs, is a question with no single answer — say so instead of guessing.
+    if (res.indices.size() != 1)
+    {
+        if (msg)
+            *msg = "'" + selector + "' matches " + std::to_string(res.indices.size()) +
+                   " runs — watch one at a time:\n" + ListActiveRuns();
+        return false;
+    }
+
+    DcTestRunJob const* job = _runs[res.indices.front()].get();
+    if (tankOut)
+        *tankOut = job->TankGuid();
+    if (msg)
+        *msg = job->RunId() + " (" + job->DungeonToken() + ")";
+    return true;
+}
+
 bool DcTestRunManager::Stop(std::string const& selector, std::string* msg)
 {
     std::vector<DcTestRunSelect::RunRef> refs;

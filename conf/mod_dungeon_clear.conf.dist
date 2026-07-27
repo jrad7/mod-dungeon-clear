@@ -1240,13 +1240,26 @@ DungeonClear.AdvanceWindowYards = 0.0
 
 #
 #    DungeonClear.SpectateEnable
-#        Master gate for the spectator free-camera (`.dc spectate` or the addon's
-#        Spectate button). The camera detaches the player from their character —
-#        the bots keep playing the body while the player free-flies the instance.
-#        Some servers consider this a cheat, so it can be disabled here: with 0,
-#        attempting to spectate is refused with "Spectator mode is disabled on
-#        this server." (an active spectate can still be ended). This is a
-#        server-only setting; players cannot override it from the addon.
+#        Master gate for the spectator camera, in both of its modes:
+#            `.dc spectate`              — free-flying camera (addon: left-click
+#                                          Spectate). Detaches the player from
+#                                          their character; the bots keep
+#                                          playing the body while the player
+#                                          flies the instance.
+#            `.dc spectate follow [name]`— follow cam (addon: right-click
+#                                          Spectate). The view rides a bot and
+#                                          tracks it as the server moves it,
+#                                          handing off to another tank if that
+#                                          one dies or logs out.
+#            `.dc test watch [selector]` — GM only: teleport into a running
+#                                          `.dc test` instance (GM mode on so
+#                                          the run can't see you) and start the
+#                                          follow cam on arrival. `off` ends it.
+#        Neither mode requires a group. Some servers consider detaching the
+#        camera a cheat, so it can be disabled here: with 0, attempting to
+#        spectate is refused with "Spectator mode is disabled on this server."
+#        (an active spectate can still be ended). This is a server-only setting;
+#        players cannot override it from the addon.
 #            0 = disabled
 #            1 = enabled
 #        Default: 1 (enabled)
@@ -1260,7 +1273,8 @@ DungeonClear.SpectateEnable = 1
 #        or the addon's Spectate button) — how fast the detached camera flies,
 #        as a multiple of normal run speed. The camera is a possessed invisible
 #        dummy, so this affects only the camera, never the character (which
-#        keeps running under bot AI at its own speed).
+#        keeps running under bot AI at its own speed). Follow cam ignores this:
+#        it rides a bot rather than flying, so its speed is the bot's.
 #
 #        Default: 2.5
 #
