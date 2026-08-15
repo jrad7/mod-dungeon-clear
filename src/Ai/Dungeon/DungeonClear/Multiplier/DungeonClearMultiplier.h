@@ -20,4 +20,17 @@ public:
     float GetValue(Action* action) override;
 };
 
+// COMBAT-engine companion multiplier. The DungeonClearMultiplier above rides the
+// NON-combat strategy, so it can only touch non-combat actions. This one rides the
+// combat strategy and touches EXACTLY ONE combat action — the stock "drop target"
+// — to stop the flip-early party-assist from ping-ponging the engine (drop target
+// treats an out-of-LOS seeded fight target as invalid and leaves the combat engine
+// before reach can close). Everything else in the combat engine stays fully stock.
+class DungeonClearCombatMultiplier : public Multiplier
+{
+public:
+    DungeonClearCombatMultiplier(PlayerbotAI* botAI) : Multiplier(botAI, "dungeon clear combat") {}
+    float GetValue(Action* action) override;
+};
+
 #endif

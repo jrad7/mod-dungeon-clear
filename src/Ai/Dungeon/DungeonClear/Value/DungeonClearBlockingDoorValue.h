@@ -8,6 +8,7 @@
 
 #include "ObjectGuid.h"
 #include "Value.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
 
@@ -26,7 +27,7 @@ public:
     // events, not per-tick. The grid walk over m_gameobjectBySpawnIdStore
     // is cheap (small dungeon maps) but cheap × 50ms is still wasted CPU.
     DungeonClearBlockingDoorValue(PlayerbotAI* botAI)
-        : CalculatedValue<ObjectGuid>(botAI, "dungeon clear blocking door", 500)
+        : CalculatedValue<ObjectGuid>(botAI, DcKey::BlockingDoor, 500)
     {
     }
 

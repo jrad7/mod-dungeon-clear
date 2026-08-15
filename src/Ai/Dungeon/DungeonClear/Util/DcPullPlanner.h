@@ -19,11 +19,18 @@ class AiObjectContext;
 // aggro estimate, the same estimate with lone (non-formation) patrollers excluded,
 // and the Leeroy ceiling they were compared against. `full > ceiling &&
 // reduced <= ceiling` is the patrol-contended condition.
+//
+// All three counts are in THIRDS OF AN ELITE (elite = 3, normal = 1), the unit the
+// verdict comparison works in. `bodyCount` is the same estimate as a plain head
+// count — not used by any gate, but it is what a human means by "how many mobs
+// will this pull", so it is what the pull telemetry compares against the number
+// that actually turned up.
 struct DcPullClassification
 {
     std::uint32_t fullCount    = 0;
     std::uint32_t reducedCount = 0;
     std::uint32_t ceiling      = 0;
+    std::uint32_t bodyCount    = 0;
 };
 
 class DcPullPlanner
@@ -72,10 +79,11 @@ public:
     // verdict per target GUID (so a single approaching pack isn't re-judged every
     // tick and the party isn't churned between follow/hold), and drives `dungeon
     // clear pull mode` (+ leader daze immunity + camp seed) so the rest of the
-    // existing pipeline runs the chosen maneuver. Called at the top of
-    // DungeonClearPullTrigger::IsActive, which the engine evaluates before the
-    // engage triggers each tick. Publishes the verdict to `dungeon clear pull
-    // decision` for the addon. Leader-only (the caller has already gated on that).
+    // existing pipeline runs the chosen maneuver. Now invoked from the per-bot
+    // DungeonClearPullModeCurrentValue::Calculate (any consumer may read it on any
+    // bot), so it self-gates: it no-ops unless the bot is the enabled, non-paused
+    // dungeon-clear leader. Publishes the verdict to `dungeon clear pull decision`
+    // for the addon.
     static void UpdateDynamicPullMode(PlayerbotAI* botAI, AiObjectContext* context);
 
     // Picks the advanced-pull camp: a rally point `setback` yards BACK along the
@@ -107,6 +115,21 @@ public:
     // nullopt only when there is no bot.
     static std::optional<Position> ComputeTrailCamp(PlayerbotAI* botAI, float setback,
                                                     float maxDrag);
+
+    // Per-tick camp upkeep for the LEADER: lay a breadcrumb and keep the party's
+    // camp trailing `PullSetback` behind us while merely scouting (pull phase Idle,
+    // out of combat, no fresh pull publish). Hoisted out of
+    // DungeonClearAdvanceAction::Execute so it is no longer the exclusive property
+    // of the advance rung: any action that DRIVES the leader forward must call it,
+    // or the camp goes stale the moment a higher rung takes the tick and the party
+    // is left pinned at a spot the tank has walked away from — while the tank waits
+    // for a party that has been told to stand there. That deadlock is exactly what
+    // froze Old Hillsbrad: the barrel objective (DcObjectiveArriveAction, relevance
+    // 30) drove the tank ~76yd off the elevated walkway into the courtyard, advance
+    // (15) never ran again, and the party held on the walkway one terrace up.
+    // Idempotent within a tick (the breadcrumb has a spacing gate and the camp
+    // adoption is forward-only), so calling it from several rungs is safe.
+    static void MaintainScoutCamp(PlayerbotAI* botAI, AiObjectContext* context);
 
     // True when the party is "set" for the tank to pull: every living, on-map,
     // non-leader BOT follower is within `setRadius` of `camp` AND currently

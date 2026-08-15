@@ -7,6 +7,7 @@
 #define _PLAYERBOT_DUNGEONCLEARROOMTRASHVALUE_H
 
 #include "Value.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
 
@@ -29,7 +30,7 @@ class DungeonClearRoomTrashValue : public CalculatedValue<GuidVector>
 {
 public:
     DungeonClearRoomTrashValue(PlayerbotAI* botAI)
-        : CalculatedValue<GuidVector>(botAI, "dungeon clear room trash remaining", 500)
+        : CalculatedValue<GuidVector>(botAI, DcKey::RoomTrashRemaining, 500)
     {
     }
 

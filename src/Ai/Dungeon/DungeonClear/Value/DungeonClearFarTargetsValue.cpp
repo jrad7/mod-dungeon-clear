@@ -10,6 +10,7 @@
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Playerbots.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 namespace
 {
@@ -24,7 +25,7 @@ DungeonClearFarTargetsValue::DungeonClearFarTargetsValue(PlayerbotAI* botAI)
     // checkInterval = 500ms. Long enough that the wider grid scan doesn't
     // run every Update tick; short enough that newly-aggroed packs appear
     // in the value within ~one fast turn-and-cast cycle.
-    : NearestUnitsValue(botAI, "dungeon clear far targets", FarRange(), /*ignoreLos*/ true, 500)
+    : NearestUnitsValue(botAI, DcKey::FarTargets, FarRange(), /*ignoreLos*/ true, 500)
 {
 }
 

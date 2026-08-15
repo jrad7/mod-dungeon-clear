@@ -17,7 +17,10 @@ AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src")
 
 AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 
-# New files added: DungeonClearDispatch.h, DungeonClearAddonHook.cpp,
+# New files added: Util/DcFirstContact.{h,cpp} (records the enemy that STARTED
+#   each fight, off the OnPlayerEnterCombat `enemy` parameter DC had been
+#   discarding — the pull record only covers fights DC pulled),
+#   DungeonClearDispatch.h, DungeonClearAddonHook.cpp,
 # Action/BetterLootRollAction.{h,cpp} (self-bot no-auto-roll override),
 # Data/DungeonWingRegistry.{h,cpp}, Action/StayDeadAction.{h,cpp},
 # Util/CorridorCenter.{h,cpp}, Value/DungeonClearLiveBossValue.{h,cpp},
@@ -62,6 +65,10 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 # src/Util/DcSpectator.{h,cpp}
 #   (module-root src/Util/ — session plumbing, not bot AI: spectator
 #    free-camera via WORLD_TRIGGER possession, `.dc spectate` / addon button)
+# src/Util/DcWatchHop.{h,cpp}
+#   (pure instance-bind planner for `.dc test watch`: which binds to release,
+#    whether to re-bind, and whether the teleport must be forced far so a
+#    second watch lands in the LIVE copy instead of the finished one)
 # Data/RoomAggroRegistry.{h,cpp}
 #   (room-wide-aggro boss table: bosses that force the whole room into combat on
 #    engage; the tank clears the room before the pull — ClearRoomBeforeBoss)
@@ -84,6 +91,12 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #    each file's Register<Dungeon>Events/Conditions appender — explicit calls so
 #    every per-dungeon TU stays linked into the module static lib. Add a dungeon
 #    = one new file + one call.)
+#   (fable2 T2.3: the per-dungeon file is now the dungeon's whole "definition
+#    unit" — its BossRosterPatch (Register<Dungeon>Roster, aggregated by
+#    BossRosterRegistry) and any wing layout (Register<Dungeon>Wings, aggregated
+#    by DungeonWingRegistry) moved in alongside the event rows, built with the
+#    shared DcRoster helpers in Data/Events/DungeonRosterBuilders.h. NEW file:
+#    Data/Events/MaraudonEvents.cpp — wings-only definition unit for map 349.)
 # Action/DcActionShared.{h,cpp}, Action/DcAdvanceAction.cpp,
 # Action/DcEngageActions.cpp, Action/DcPullActions.cpp,
 # Action/DcFollowerActions.cpp
@@ -125,4 +138,256 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #    corridor avoids navmesh shortcuts a real player can't follow — e.g. the LBRS
 #    chasm wall-climb. Wired into LongRangePathfinder::BuildCoreFromMesh (now takes
 #    a mapId) and screened in the StridedPathfinder fallback too.)
+# Action/DcHakkar.cpp (Sunken Temple Avatar of Hakkar orchestration split out of
+#   DcEngageActions.cpp — fable2 T2.5)
+# REMOVED Data/EventConditionRegistry.{h,cpp}: conditional-event activation is now
+#   a function pointer on DungeonEvent (.Conditional(&Predicate)), so the global
+#   condition-id registry + id ledger are gone (fable2 T2.3 / events F7)
+# Util/DcRegroupDecision.{h,cpp}
+#   (combat-regroup Option B: pure contribution-gate kernel DecideCombatRegroup(
+#    RegroupInputs) -> RegroupVerdict — "reconnect only when a follower truly can't
+#    contribute". Engine-free, edge-pinned by t/TestCombatRegroup. Drives the
+#    rewritten DungeonClearRegroupCombat{Trigger,Action}.)
+# Data/Events/OldHillsbradEvents.cpp
+#   (Escape from Durnholde, map 560: Brazen ride -> bomb 5 barrels + Lt. Drake ->
+#    ONE EscortCreature step freeing Thrall and assisting him through Skarloc, the
+#    mounted Tarren Mill ride, the barn/church/inn waves and Epoch Hunter, gated on
+#    the instance progress counter. New step kind UseItemOnGO (cast a quest-item
+#    spell AT a positioned GO — the barrel-bomb SPELLHIT); EscortCreature gains an
+#    instance-data completion gate, a gossip-flag resume, and party mount speed-match.)
+# Util/DcSmartRestDecision.{h,cpp} + Util/DcSmartRest.{h,cpp}
+#   (Smart Rest hysteresis: pure latch kernel Decide(Inputs, members) -> Result
+#    — enter on role-based low triggers, release at full hp/mana — edge-pinned
+#    by t/TestSmartRest; DcSmartRest is the engine glue owning the DcRunState
+#    latch fields + the cross-bot IsLatched read.)
+# Util/DcWaitAtBossDecision.{h,cpp}
+#   (Wait at Boss: pure pre-pull hold kernel — auto-pause the run right before
+#    a boss pull and hold for the human's resume, once per boss per run via the
+#    DcRunState::waitedBossGuid stamp; edge-pinned by t/TestWaitAtBoss. The gate
+#    lives in DungeonClearEngageBossAction just before EngageDirect.)
+# Value/DungeonClearPartyMemberToHealValue.{h,cpp}
+#   (decorator over the stock `party member to heal` value, registered under the
+#    same name so it fronts it: delegates to stock, then folds the DC escortee
+#    into the heal candidate set while an escort is live — so the healer heals
+#    Thrall / the Disciple / any escortee exactly like a party member. Paired with
+#    DcLeaderSignal::GetLeaderEscortee (generic active-EscortCreature-step lookup)
+#    and the escortee fold-in on DungeonClearHealTargetValue (reposition mover).)
+# Util/DcBreadcrumb.h
+#   (RecordBreadcrumb hoisted out of DcAdvanceAction.cpp so the item-on-GO
+#    objective drive records the centered trail too — followers inherit it during
+#    the Old Hillsbrad barrel run. Paired with a party-cohesion spread gate in
+#    DriveUseItemOnGO so the tank waits for the party between houses instead of
+#    sprinting off while the panel reports "waiting".)
+# TestRun/DcTestRunVerdict.{h,cpp}, TestRun/DcTestDungeonRegistry.{h,cpp},
+# TestRun/DcTestComp.{h,cpp}, TestRun/DcTestRunRecord.{h,cpp},
+# TestRun/DcTestRunManager.{h,cpp}
+#   (`.dc test` automated dungeon test harness: pure verdict kernel + supported-
+#    dungeon/entrance registry + randomised party comp (DcTestComp::BuildComp
+#    rolls a distinct-class tank/heal/3-dps party from a recorded seed; pinned
+#    by t/TestTestComp) + JSONL run-result sink + the state-machine manager that
+#    spawns/gears/groups/teleports a 5-bot party, starts the run, watches it,
+#    and records the outcome.)
+# TestRun/DcTestRunSelect.{h,cpp}, TestRun/DcTestRunLiveJson.{h,cpp}
+#   (concurrent-run refactor pure helpers: DcTestRunSelect resolves the
+#    `.dc test stop <selector>` precedence (bare/all/runId/dungeon-token) to a
+#    set of run indices, and NextWatchIndex holds the `.dc test watch next`
+#    cycle rule (wrap, cold start, stay put when there is nowhere to hop);
+#    DcTestRunLiveJson builds the multi-run live-heartbeat
+#    JSON ({"active","ts","runs":[…]}) the dashboard polls. Both engine-free and
+#    edge-pinned by t/TestTestRunSelect + t/TestTestRunLiveJson. Paired with the
+#    DcTestRunJob per-run FSM extraction + DcTestRunManager registry rewrite.)
+# TestRun/DcTestRunJob.{h,cpp}
+#   (per-run FSM extracted verbatim from the old singleton DcTestRunManager so N
+#    runs can execute at once; DcTestRunManager is now a run registry.)
+# Util/DcFormGate.h
+#   (header-only shapeshift gate for the item-use casts: a feral-form druid tank
+#    fails Spell::CheckCast's CheckShapeshift, so every quest-item interaction
+#    — Old Hillsbrad's barrel bombs, the Deadmines cannon, the Mechanar cache —
+#    silently no-ops until the form is dropped. Called just before each
+#    CastItemUseSpell.)
+# TestRun/DcDiagSnapshot.{h,cpp}
+#   (end-of-run failure diagnostics: one read-only Snapshot of the whole run —
+#    party positions/liveness/combat, the current boss target, route + wedge
+#    watchdog counters, the stall reason, and the roster with WHICH completion
+#    path fired per boss. Captured in DcTestRunJob::Teardown before the party is
+#    disbanded, serialized under "diag" in dc_testruns.jsonl (schema 3).)
+# Data/DcHazardRegistry.{h,cpp}
+#   (per-map table of creatures emitting a persistent damaging aura bots must
+#    stand outside of — the Arcatraz Sentinel's 15yd/1s Energy Discharge is the
+#    forcing case. Split in two halves because they run on different threads:
+#    the ROUTE half is hand-authored DcNavPenaltyRegistry boxes (the emitters are
+#    rooted, and DcRouteFilter runs on the worker thread where no Map* exists);
+#    the LIVE half is DcHazard::PointIsHot/LegIsHot over DungeonClearHazardsValue,
+#    consumed by the camp/standoff solvers on the map thread.)
+# Value/DungeonClearHazardsValue.{h,cpp}
+#   (500ms-cached NearestUnitsValue of live hazard emitters near the bot. Needs a
+#    PERMISSIVE AcceptUnit — the Arcatraz corpse bombs carry UNIT_DYNFLAG_DEAD and
+#    are filtered out by AttackersValue::IsPossibleTarget, so DcKey::FarTargets
+#    cannot be reused for this.)
+# Util/DcHazard.{h,cpp}
+#   (the live predicates the camp/standoff solvers call: PointIsHot/SegmentIsHot
+#    for the persistent pulse, plus NearestVacate for the active retreat from an
+#    unfightable pulse creature — the Arcatraz Destroyed Sentinel summon.)
+# Trigger/DungeonClearHazardVacateTrigger + Action/DungeonClearHazardVacateAction
+#   (survival move: walk every party bot out of an unfightable hazard emitter's
+#    pulse and hold until it despawns. Registered in BOTH strategies at
+#    DcRel::HazardVacate = 55 — the Destroyed Sentinel pulses after the kill, once
+#    combat has usually dropped.)
+# Data/Events/ArcatrazEvents.cpp
+#   (map 552: Warden Mellichar's stasis-pod wave finale + roster patch.)
+# Data/Events/SethekkHallsEvents.cpp
+#   (map 556: force-summon & kill Anzu — send-event 14797 via ObjectiveHook 7 —
+#    + Objective-anchor roster patch. Bonus boss, works on normal difficulty.)
+# Util/DcRezDecision.h + Util/DcRezRecovery.{h,cpp}
+#   (post-combat party resurrection: a death HOLDS the run while a living
+#    Priest/Paladin/Shaman/Druid can recover it instead of disabling on the
+#    spot. Pure header-only election/timeout kernel Decide(Inputs, members) ->
+#    Result, edge-pinned by t/TestPostCombatRez; DcRezRecovery is the engine
+#    glue — dead-tolerant run-owner resolution, same-map snapshot KEEPING dead
+#    members, the DcRunState rezPendingSinceMs/rezAnnounceMs clocks, and the
+#    IsPending hold-gate read used by the between-pulls + event-rest gates.
+#    Paired with the relaxed party-died trigger and the all-bots
+#    DungeonClearRezParty{Trigger,Action} rung at DcRel::RezParty = 31.5.)
+# Util/DcStrandedDecision.h + Util/DcStrandedRecovery.{h,cpp}
+#   (stranded-member recovery failsafe: when the run has shown no progress for
+#    DungeonClear.StrandedRecoveryNoProgressSecs while a bot member is stuck out
+#    of range — fell under the world / wedged — the leader teleports the strays to
+#    itself. Pure header-only Decide(Inputs, members) -> Result kernel, edge-pinned
+#    by t/TestStrandedRecovery; DcStrandedRecovery is the engine glue — leader-only
+#    clock ownership, the DcRunState progress* fields, a harness-mirroring progress
+#    detector (encounter mask / cleared anchors / closing distance) and the group
+#    teleport. Paired with the leader-only DungeonClearRecoverStranded{Trigger,
+#    Action} rung at DcRel::StrandedRecovery = 42.)
+# Data/Events/BlackMorassEvents.cpp
+#   (map 269: the fully event-driven CoT Opening of the Dark Portal — Sa'at
+#    gossip, portal-grounds pre-clear, Medivh proximity start + garrison via
+#    ObjectiveHook 8, and the repeatable conditional wave-kill event that
+#    closes all 18 time rifts. Objectives-only roster patch — every boss is a
+#    rift TempSummon.)
+# TestRun/DcWipeContext.{h,cpp}
+#   (wipe post-mortem: the pure latch rule that answers "did we lose the boss
+#    fight or did a trash pack eat us?". Combat ends when the last member dies,
+#    so the harness samples the party's opponent every monitor step and only a
+#    clean disengage clears it — a wipe never does. Edge-pinned by
+#    t/TestWipeContext; DcTestRunJob::TrackEngagement is the engine glue, and
+#    the result rides out on the run record (wipeOnBoss/wipeOpponent) and the
+#    live heartbeat.)
+# Overrides/BlackMorassDriver.cpp
+#   (map 269's CONTROLLER half, lifted out of ObjectiveHookRegistry.cpp. Hooks 8
+#    and 12 are the only on-arrival behaviour in the module that re-decides from
+#    live world state every tick instead of doing one thing on arrival, so they
+#    carry their own movement (StepsOwnMovement + repath/reissue throttling),
+#    engagement (REACT_DEFENSIVE rift adds the normal pipeline cannot see) and
+#    rift/keeper/drainer selection layers. Registered via RegisterBlackMorassHooks,
+#    called explicitly from Hooks() — a static-lib TU with only constructor side
+#    effects gets dropped by the linker. The DECLARATIVE half of 269 stays in
+#    Data/Events/BlackMorassEvents.cpp.)
+# TestRun/DcTestRoster.{h,cpp}
+#   (`.dc test start <d> party=Tank,Heal,D1,D2,D3` — hand-picked parties of REAL
+#    player characters, from any account, launchable from the Command Deck. This
+#    is only the pure grammar (split, trim, positional roles, refuse a bad list),
+#    edge-pinned by t/TestTestRoster; the engine half is
+#    DcTestRunJob::CreateFromRoster + DcTestRunManager::StartRoster. Roster runs
+#    log in MASTERLESS (AddPlayerBot with masterAccountId 0 — the ownership gate
+#    refuses a hand-picked party on any other path), never roll the factory (no
+#    respec/regear/relevel: the characters fight as they are), and always unbind
+#    both difficulties first so every run gets a fresh instance.)
+# TestRun/DcTestGearTiers.{h,cpp}
+#   (per-run gear ceiling: `.dc test start <d> ilvl=N quality=epic`, the same two
+#    options on `.dc test plan start`, and the ladder of ceilings worth offering
+#    for a given dungeon — named raid tiers from the AutoGearScoreLimit conf
+#    table at the level cap, three steps around the dungeon's own gear below it.
+#    Pure kernel, edge-pinned by t/TestTestGearTiers; the engine half is
+#    DcTestRunJob::TickProvisioning building PlayerbotFactory with the resolved
+#    pair, and DcTestDungeonRegistry::WriteSidecar publishing the ladders for the
+#    Command Deck's start form.)
+# Util/DcCombatFlag.{h,cpp}
+#   (flag-vs-fight: the one shared answer for every rung that used to stand down
+#    on a bare bot->IsInCombat(). A 45yd hostile area aura flags the whole party
+#    in with nothing aggroed, and each rung that keyed on the raw flag froze on
+#    it in turn — the leader's driving ladder (fixed S1356), then the follower's
+#    follow-tank rung, the between-pulls rest floors, the stranded failsafe and
+#    the post-combat rez clock. MayDrive / IsPhantomFlag / AnyPartyEngagement,
+#    all over DungeonClearMath::MayDriveWhileFlagged's grace.)
 # (this comment bumps mtime to force CMake re-glob on next build)
+# Util/DcTankForm.{h,cpp}
+#   (pre-pull shapeshift gate — the mirror of DcFormGate. A feral druid is only
+#    ever shifted by BearDruidStrategy's "bear form" trigger, which is
+#    combat-engine only, while every DC pull is opened on the NON-combat engine;
+#    so the druid tank tagged in caster form, ate the pack's opener at caster
+#    armour, and shifted a beat late. EnsureBearForm is called fire-and-forget
+#    from DungeonClearPullAction (whenever a pull is live) and from EngageDirect
+#    (inside DC_PULL_START_RANGE), so nothing can wait on a form that won't go
+#    up.)
+# Data/ScriptedPullRegistry.{h,cpp}
+#   (hand-authored "peel this pack out of that room, in this order, from this
+#    exact spot" plans — the third member of the positional-override family, and
+#    the middle ground between FightInPlaceRegistry, which FORBIDS a pull, and
+#    BossPullbackRegistry, which MANDATES one for a boss. A row names the party
+#    camp, the tank's stand spot (the one place with line of sight to exactly one
+#    pack), the pack's cylinder + entry filter, and its position in the pull
+#    sequence. Selin Fireheart's room is the case it exists for: every pack in it
+#    shares sight-lines with the boss, so the safe spots are facts about the
+#    room's walls that no aggro-radius or navmesh probe can derive.)
+# Data/SealedEncounterRegistry.{h,cpp}
+#    (SEALED ENCOUNTERS: bosses whose room LOCKS on encounter start, via an
+#    InstanceScript DOOR_TYPE_ROOM door held `open &= (state != IN_PROGRESS)`.
+#    Magisters' Terrace registers one for Selin Fireheart — the Assembly Chamber
+#    Door 188065 at (215.1, 0.4) — so engaging him shuts the only way in and any
+#    follower still in the corridor spends the whole fight at a closed door. A row
+#    names the sealed VOLUME, because the tank crosses the threshold before it
+#    engages and so a radius around the tank cannot express "will be locked out";
+#    plus a tank-anchored clump radius for the final approach, which is what makes
+#    the muster satisfiable without a long wait inside the boss's aggro range.)
+# Util/DcPlayerbotCompat.h
+#   (header-only: IsSelfBot / IsRealPlayer / IsHumanControlled written against
+#    only the mod-playerbots API that is identical on master and test-staging,
+#    so this module builds on both across PR #2592. No .cpp, so no re-glob is
+#    needed for it — listed here to keep the file inventory complete.)
+# Data/DcSocialQuarantineRegistry.{h,cpp} + Util/DcSocialQuarantine.{h,cpp}
+#   (SOCIAL QUARANTINE — the fourth positional override, and the only one that
+#    changes the MOBS rather than the party. While a named boss is the run's
+#    objective, every pack the plan is not currently pulling is held at
+#    REACT_DEFENSIVE, which is the first thing Creature::CanAssistTo tests and
+#    the gate CreatureAI/SmartAI::MoveInLineOfSight passes before AttackStart —
+#    so a quarantined pack can be neither RECRUITED by a call for help nor woken
+#    by walking past it, while CreatureGroup::MemberEngagingTarget (which does
+#    not test react state) keeps it fighting as a formation the instant anything
+#    actually attacks it. Volumes come from the scripted-pull plan's own pack
+#    cylinders, minus the due stage, plus hand-authored zones for packs with no
+#    pull row. Built for the Magisters' Terrace rotunda, whose east/north-east
+#    and centre/north-east pairs are inside CreatureFamilyAssistanceRadius AT
+#    SPAWN — a T=0 bond no stand spot, opener or ordering can break.)
+# TestRun/DcTestAreaTriggers.{h,cpp}
+#   (AREATRIGGER RELAY for headless runs. An areatrigger is a client-side
+#    volume: the only thing that ever runs an at_* script is
+#    WorldSession::HandleAreaTriggerOpcode fed by a client's CMSG_AREATRIGGER,
+#    and stock playerbots only relays a HUMAN MASTER's packet
+#    (masterIncomingPacketHandlers) — its position-based WithinAreaTrigger
+#    returns false for anything without an areatrigger_teleport row. So a
+#    5-bot test party fires NO scripted areatriggers at all. The Underbog's
+#    Ghaz'an is the proof: at_underbog_ghazan (4302) is the only caller of his
+#    ACTION_MOVE_TO_PLATFORM, so without it he swims his underwater DB patrol
+#    (path 1383920, z 32-47) all run instead of climbing to his platform (path
+#    1383921, z 81.4). The job sends the packet for whichever member is
+#    standing in the volume, edge-triggered like a client. Scoped hard: test
+#    runs only, bot-only groups only (a human-controlled member's own client is
+#    already sending it — relaying would double-fire), and scripted
+#    NON-teleport triggers only (the instance exit is an areatrigger).)
+# Util/DcZoneLine.{h,cpp}
+#   (ZONE-LINE KEEP-OUT for camp placement. An advanced pull drags the pack back
+#    onto cleared ground, and at a dungeon's FIRST pull the only cleared ground
+#    behind the tank is the entrance it walked in through — so ComputeSafeCamp /
+#    ComputeTrailCamp / GetLeaderScoutTrailPoint would plant the camp on, or
+#    past, the instance exit areatrigger. Nothing downstream catches it: the
+#    navmesh has no idea areatriggers exist, so IsNavReachable says yes. The cost
+#    is asymmetric — a headless bot sends no CMSG_AREATRIGGER and shrugs it off,
+#    but a SELF-BOT is a real client, reports the trigger, and the player is
+#    teleported out of the instance mid-run. This indexes every map-changing
+#    areatrigger by the map it stands on (ObjectMgr, snapshot by value, built
+#    once) and offers a point test padded by CampMargin plus a segment test
+#    padded by the much thinner WalkMargin — a camp can sit cleanly BEYOND a zone
+#    line with both endpoints clear while the leg to it goes straight through.
+#    Margins pad in XY only, never Z: a fall-catcher slab's ceiling sits a couple
+#    of yards UNDER the floor beside it, and padding its height would make a
+#    third of Shadowfang un-campable.)

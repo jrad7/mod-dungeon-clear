@@ -4,6 +4,7 @@
  */
 
 #include "DungeonClearChatActions.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
 #include <map>
 #include <optional>
@@ -12,7 +13,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "Config.h"
 #include "Creature.h"
 #include "Group.h"
 #include "Map.h"
@@ -20,19 +20,43 @@
 #include "ObjectGuid.h"
 #include "Player.h"
 #include "InstanceScript.h"
+#include "Ai/Dungeon/DungeonClear/Action/DcActionShared.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPlayerbotCompat.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRezRecovery.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearStateValues.h"
 #include "Playerbots.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 namespace
 {
+    // Refuse a dc command with a reason the issuer can actually receive.
+    //
+    // TellError whispers the bot's MASTER, and PlayerbotAI::TellError drops the
+    // message outright when that master is itself a bot
+    // (`GET_PLAYERBOT_AI(master)` bails before the error map). That is exactly
+    // the headless `.dc test` case — the party's master is the test driver, a
+    // fake-session bot — so every refusal reason vanished silently and the
+    // harness's "see the server log for the bot's error chat" pointed at a line
+    // nothing ever wrote. Log the ones that could reach nobody; a refusal a
+    // real player can read still goes to chat only, so normal play stays quiet.
+    void DcRefuse(PlayerbotAI* botAI, Player* bot, std::string const& why)
+    {
+        botAI->TellError(why);
+
+        Player* master = botAI->GetMaster();
+        if (!master || GET_PLAYERBOT_AI(master))
+            LOG_WARN("playerbots.dungeonclear", "DC command refused for {}: {}",
+                     bot ? bot->GetName() : "<unknown>", why);
+    }
+
     bool IsAuthorized(Player* bot, Event const& event)
     {
         Player* owner = const_cast<Event&>(event).getOwner();
@@ -42,12 +66,18 @@ namespace
         // own PlayerbotAI has master == bot). Without this exception the
         // moment a player enables bot self mode they would be silently
         // locked out of every dc command.
-        if (PlayerbotAI* ownerAI = GET_PLAYERBOT_AI(owner))
-            if (!ownerAI->IsRealPlayer())
+        if (GET_PLAYERBOT_AI(owner))
+            if (!DcPlayerbotCompat::IsSelfBot(owner))
                 return false;
         if (!bot || !bot->GetGroup())
             return false;
-        return bot->GetGroup()->IsMember(owner->GetGUID());
+        if (bot->GetGroup()->IsMember(owner->GetGUID()))
+            return true;
+        // GM allowance: the `.dc test` harness (and a GM debugging a run)
+        // issues dc commands at a bot party it is deliberately NOT a member
+        // of — the whole point of a test run is a pure-bot group.
+        return owner->GetSession() &&
+               owner->GetSession()->GetSecurity() >= SEC_GAMEMASTER;
     }
 
     bool AnyPartyMemberDead(Player* bot)
@@ -134,7 +164,7 @@ namespace
         // so a field can never be forgotten at one of the 8 call sites. The tag
         // latch and breadcrumb trail used to be omitted here, which is why a stale
         // tag from the previous engagement could make the next pull skip its run-in.
-        context->GetValue<DcPullContext&>("dungeon clear pull context")->Get().Reset();
+        context->GetValue<DcPullContext&>(DcKey::PullContext)->Get().Reset();
     }
 
     // Applies an advanced-pull preference (0 Off / 1 On / 2 Dynamic) to the live
@@ -149,11 +179,11 @@ namespace
     void ApplyPullSetting(Player* bot, AiObjectContext* context, uint32 setting)
     {
         bool const active = (setting == 1u);
-        context->GetValue<uint32>("dungeon clear pull setting")->Set(setting);
-        context->GetValue<bool>("dungeon clear pull mode")->Set(active);
+        context->GetValue<uint32>(DcKey::PullSetting)->Set(setting);
+        context->GetValue<bool>(DcKey::PullMode)->Set(active);
         DcLeaderSignal::SetLeaderDazeImmunity(bot, active);
         if (active)
-            context->GetValue<DcPullContext&>("dungeon clear pull context")->Get().camp =
+            context->GetValue<DcPullContext&>(DcKey::PullContext)->Get().camp =
                 Position(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ());
         else
             ResetPullTransient(context);
@@ -172,18 +202,18 @@ namespace
         // recovery counters, the pursuit/dead-end latches, the loot-yield anchor,
         // the position sentinel + committed boss, and the long-path cache state
         // (so the first Advance tick rebuilds fresh from here). See DcApproachState.
-        context->GetValue<DcApproachState&>("dungeon clear approach state")->Get().Reset();
-        context->GetValue<std::string&>("dungeon clear stall reason")->Get().clear();
-        context->GetValue<std::string&>("dungeon clear last said reason")->Get().clear();
-        context->GetValue<ObjectGuid>("dungeon clear fallback target")->Set(ObjectGuid::Empty);
-        context->GetValue<ObjectGuid>("dungeon clear engage trash target")->Set(ObjectGuid::Empty);
-        context->GetValue<uint32>("dungeon clear current hop")->Set(0u);
-        context->GetValue<ChunkedPathfinder::Result&>("dungeon clear long path")->Reset();
-        context->GetValue<DungeonFollowerState&>("dungeon clear follower state")->Get() = DungeonFollowerState{};
+        context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get().Reset();
+        context->GetValue<std::string&>(DcKey::StallReason)->Get().clear();
+        context->GetValue<std::string&>(DcKey::LastSaidReason)->Get().clear();
+        context->GetValue<ObjectGuid>(DcKey::FallbackTarget)->Set(ObjectGuid::Empty);
+        context->GetValue<ObjectGuid>(DcKey::EngageTrashTarget)->Set(ObjectGuid::Empty);
+        context->GetValue<uint32>(DcKey::CurrentHop)->Set(0u);
+        context->GetValue<ChunkedPathfinder::Result&>(DcKey::LongPath)->Reset();
+        context->GetValue<DungeonFollowerState&>(DcKey::FollowerState)->Get() = DungeonFollowerState{};
 
-        context->GetValue<bool>("dungeon clear paused")->Set(false);
-        context->GetValue<std::string&>("dungeon clear pause reason")->Get().clear();
-        context->GetValue<ObjectGuid>("dungeon clear paused door")->Set(ObjectGuid::Empty);
+        // Named pause-cluster teardown: paused flag + reason + auto-paused door in
+        // lockstep. Boss progress is deliberately untouched — resume, not fresh run.
+        DcRun::Of(context).OnResume();
         ResetPullTransient(context);
     }
 }
@@ -192,7 +222,7 @@ bool DcOnAction::Execute(Event event)
 {
     if (!IsAuthorized(bot, event))
     {
-        botAI->TellError("Not authorized to enable dungeon clear");
+        DcRefuse(botAI, bot, "Not authorized to enable dungeon clear");
         return false;
     }
     // Party chat fans `dc on` out to every bot the master owns, so non-leader
@@ -216,20 +246,23 @@ bool DcOnAction::Execute(Event event)
     }
     if (!bot->GetMap() || !bot->GetMap()->IsDungeon())
     {
-        botAI->TellError("Not in a dungeon.");
+        DcRefuse(botAI, bot, "Not in a dungeon.");
         return false;
     }
 
-    auto const& bosses = AI_VALUE(std::vector<DungeonBossInfo>, "dungeon bosses");
+    auto const& bosses = AI_VALUE(std::vector<DungeonBossInfo>, DcKey::DungeonBosses);
     if (bosses.empty())
     {
-        botAI->TellError("No bosses found for this map.");
+        DcRefuse(botAI, bot, "No bosses found for this map.");
         return false;
     }
 
-    if (AnyPartyMemberDead(bot))
+    // A corpse only refuses enabling when the post-combat rez flow can't
+    // recover it (feature off, or no living rez class) — otherwise the run
+    // starts and the recovery immediately holds it while the rez happens.
+    if (AnyPartyMemberDead(bot) && !DcRezRecovery::CanRecover(bot))
     {
-        botAI->TellError(FirstDeadName(bot) + " is dead — rez and try again.");
+        DcRefuse(botAI, bot, FirstDeadName(bot) + " is dead — rez and try again.");
         return false;
     }
 
@@ -245,50 +278,50 @@ bool DcOnAction::Execute(Event event)
         botAI->ChangeStrategy("+dungeon clear combat", BOT_STATE_COMBAT);
 
     // Reset transient state and enable.
-    context->GetValue<bool>("dungeon clear enabled")->Set(true);
+    DcRun::Of(context).enabled = true;
     // Register this tank with the event-driven status pusher so the server
     // begins emitting STATUS packets on state transitions (replacing the
     // addon's old 2s poll). The matching UnmarkActiveTank lives in every
     // disable path: dc off, skip-to-empty, and DisableDungeonClear.
     DcStatusPublisher::MarkActiveTank(bot->GetGUID());
-    context->GetValue<bool>("dungeon clear paused")->Set(false);
-    context->GetValue<std::string&>("dungeon clear pause reason")->Get().clear();
-    context->GetValue<ObjectGuid>("dungeon clear paused door")->Set(ObjectGuid::Empty);
+    // Named pause-cluster teardown so a fresh run can never start paused / with a
+    // stale reason or auto-paused door. (enabled was just set true above.)
+    DcRun::Of(context).OnResume();
     ResetPullTransient(context);
     // Start the run already in whatever advanced-pull mode was requested. The
     // preference lives in `dungeon clear pull setting` and survives the disabled
     // window, so `dc pull off/on/dynamic` issued BEFORE `dc on` takes effect the
     // moment the run begins (default Off for a bot that never set it). Applied
     // after ResetPullTransient so the On-mode camp seed isn't wiped.
-    ApplyPullSetting(bot, context, AI_VALUE(uint32, "dungeon clear pull setting"));
-    context->GetValue<uint32>("dungeon clear selected boss")->Set(0u);
-    context->GetValue<std::unordered_set<uint32>&>("dungeon clear skipped")->Get().clear();
-    context->GetValue<std::unordered_set<uint32>&>("dungeon clear cleared anchors")->Get().clear();
-    context->GetValue<std::unordered_set<uint32>&>("dungeon clear seen bosses")->Get().clear();
-    context->GetValue<std::unordered_set<uint32>&>("dungeon clear seen due events")->Get().clear();
-    context->GetValue<std::map<ObjectGuid, uint32>&>("dungeon clear loot skip")->Get().clear();
+    ApplyPullSetting(bot, context, AI_VALUE(uint32, DcKey::PullSetting));
+    DcRun::Of(context).selectedBossEntry = 0u;
+    context->GetValue<std::unordered_set<uint32>&>(DcKey::Skipped)->Get().clear();
+    context->GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get().clear();
+    context->GetValue<std::unordered_set<uint32>&>(DcKey::SeenBosses)->Get().clear();
+    context->GetValue<std::unordered_set<uint32>&>(DcKey::SeenDueEvents)->Get().clear();
+    context->GetValue<std::map<ObjectGuid, uint32>&>(DcKey::LootSkip)->Get().clear();
     // Fresh approach FSM: clears every stuck/recovery counter, the pursuit/dead-
     // end latches, the loot-yield anchor, the position sentinel + committed boss,
     // and the long-path cache state in lockstep. The cache reset (expires/target)
     // forces a fresh long-path build on the first Advance tick so a stale path
     // from a previous `dc on`/`dc off` cycle can't be reused. See DcApproachState.
-    context->GetValue<DcApproachState&>("dungeon clear approach state")->Get().Reset();
-    context->GetValue<std::string&>("dungeon clear stall reason")->Get().clear();
-    context->GetValue<std::string&>("dungeon clear last said reason")->Get().clear();
-    context->GetValue<std::string&>("dungeon clear phase")->Get().clear();
-    context->GetValue<ObjectGuid>("dungeon clear fallback target")->Set(ObjectGuid::Empty);
-    context->GetValue<ObjectGuid>("dungeon clear engage trash target")->Set(ObjectGuid::Empty);
-    context->GetValue<uint32>("dungeon clear current hop")->Set(0u);
-    context->GetValue<ChunkedPathfinder::Result&>("dungeon clear long path")->Reset();
+    context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get().Reset();
+    context->GetValue<std::string&>(DcKey::StallReason)->Get().clear();
+    context->GetValue<std::string&>(DcKey::LastSaidReason)->Get().clear();
+    context->GetValue<std::string&>(DcKey::Phase)->Get().clear();
+    context->GetValue<ObjectGuid>(DcKey::FallbackTarget)->Set(ObjectGuid::Empty);
+    context->GetValue<ObjectGuid>(DcKey::EngageTrashTarget)->Set(ObjectGuid::Empty);
+    context->GetValue<uint32>(DcKey::CurrentHop)->Set(0u);
+    context->GetValue<ChunkedPathfinder::Result&>(DcKey::LongPath)->Reset();
     // The breadcrumb trail is part of the pull context already cleared by
     // ResetPullTransient above.
-    context->GetValue<DungeonFollowerState&>("dungeon clear follower state")->Get() = DungeonFollowerState{};
+    context->GetValue<DungeonFollowerState&>(DcKey::FollowerState)->Get() = DungeonFollowerState{};
     // Drop any active submerged swim leg so a stale 3D route can't resume on the
     // next run (the drive path also self-invalidates, but this is the clean
     // teardown alongside the rest of the run state).
-    context->GetValue<DungeonClearSwimState&>("dungeon clear swim state")->Get().Reset();
+    context->GetValue<DungeonClearSwimState&>(DcKey::SwimState)->Get().Reset();
 
-    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, "next dungeon boss");
+    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
     std::string const target = next.has_value() ? next->name : "the next boss";
     DcStatusPublisher::SendAddonMessage(botAI, "CHAT\tDungeon clear enabled. Heading to " + target + ".");
 
@@ -301,7 +334,7 @@ bool DcOffAction::Execute(Event event)
 {
     if (!IsAuthorized(bot, event))
     {
-        botAI->TellError("Not authorized to disable dungeon clear");
+        DcRefuse(botAI, bot, "Not authorized to disable dungeon clear");
         return false;
     }
 
@@ -314,47 +347,25 @@ bool DcOffAction::Execute(Event event)
     if (!DcLeaderSignal::IsDungeonClearLeader(bot))
         return true;
 
-    context->GetValue<bool>("dungeon clear enabled")->Set(false);
-    DcStatusPublisher::UnmarkActiveTank(bot->GetGUID());
-    context->GetValue<bool>("dungeon clear paused")->Set(false);
-    context->GetValue<std::string&>("dungeon clear pause reason")->Get().clear();
-    context->GetValue<ObjectGuid>("dungeon clear paused door")->Set(ObjectGuid::Empty);
-    // Revert the pull preference to the default (Dynamic) rather than Off, so a
-    // fresh `dc on` after an off starts in the recommended mode just like a
-    // brand-new bot does (see DungeonClearPullSettingValue's 2u default).
-    context->GetValue<uint32>("dungeon clear pull setting")->Set(2u);
-    context->GetValue<bool>("dungeon clear pull mode")->Set(false);
-    DcLeaderSignal::SetLeaderDazeImmunity(bot, false);
-    ResetPullTransient(context);
-    context->GetValue<uint32>("dungeon clear selected boss")->Set(0u);
-    // Tear down the whole approach FSM (counters, latches, loot-yield anchor,
-    // position sentinel + committed boss, long-path cache) in one reset.
-    context->GetValue<DcApproachState&>("dungeon clear approach state")->Get().Reset();
-    context->GetValue<std::string&>("dungeon clear stall reason")->Get().clear();
-    context->GetValue<std::string&>("dungeon clear last said reason")->Get().clear();
-    context->GetValue<ObjectGuid>("dungeon clear fallback target")->Set(ObjectGuid::Empty);
-    context->GetValue<ObjectGuid>("dungeon clear engage trash target")->Set(ObjectGuid::Empty);
-    context->GetValue<uint32>("dungeon clear current hop")->Set(0u);
-    context->GetValue<ChunkedPathfinder::Result&>("dungeon clear long path")->Reset();
-    context->GetValue<DungeonFollowerState&>("dungeon clear follower state")->Get() = DungeonFollowerState{};
+    // The full run/pull teardown — enabled flag, pause state, pull setting→Dynamic,
+    // pull-mode bool, daze-immunity revoke, selected boss, approach + pull FSM
+    // resets, loot-skip/phase clears, long-path + follower-state resets, and the
+    // addon status push — now lives in ONE place so the chat `dc off` path stays in
+    // lockstep with the auto-disable paths (party death / all-cleared / map-exit),
+    // which all route through DisableDungeonClear. This closes the drift where
+    // those paths never revoked the leader's daze immunity. The same "CHAT\t<reason>"
+    // addon line and `dc status` refresh are emitted inside it.
+    DcActionShared::DisableDungeonClear(botAI, "Dungeon clear disabled.");
 
-    // Cancel any in-flight advance/engage spline so the bot actually stops
-    // walking when the player says `dc off`. Without this, a previously
-    // queued spline keeps running to its endpoint even though the strategy is
-    // now disabled — the bot looks like it's ignoring the off command for
-    // several seconds. See HaltAllMovement for why this can't gate on isMoving().
+    // dc-off-only extras the shared teardown doesn't cover: clear the fallback
+    // target, then hard-stop any in-flight advance/engage spline so the bot visibly
+    // halts the instant the player says `dc off` (without this a queued spline runs
+    // on to its endpoint and the bot looks like it ignored the command for several
+    // seconds). See HaltAllMovement for why this can't gate on isMoving(). The
+    // "dungeon clear" strategy stays installed but inert — it stays resident on
+    // every bot via the login script regardless.
+    context->GetValue<ObjectGuid>(DcKey::FallbackTarget)->Set(ObjectGuid::Empty);
     HaltAllMovement(bot);
-
-    // Leave the "dungeon clear" strategy installed. With the enabled flag now
-    // false, every trigger and the multiplier in it are inert, so the tank is
-    // already back to stock non-combat behavior — and this matches the
-    // auto-disable paths (death / all-cleared), which only flip the flag too.
-    // It stays resident on every bot via the login script regardless.
-
-    DcStatusPublisher::SendAddonMessage(botAI, "CHAT\tDungeon clear disabled.");
-
-    // Trigger instant status addon message update
-    botAI->DoSpecificAction("dc status", event, true);
     return true;
 }
 
@@ -362,7 +373,7 @@ bool DcSkipAction::Execute(Event event)
 {
     if (!IsAuthorized(bot, event))
     {
-        botAI->TellError("Not authorized to skip");
+        DcRefuse(botAI, bot, "Not authorized to skip");
         return false;
     }
     // Only the leader owns the run state. Non-leaders reached via the party-chat
@@ -370,9 +381,9 @@ bool DcSkipAction::Execute(Event event)
     // the leader). Without this they'd each error "not enabled".
     if (!DcLeaderSignal::IsDungeonClearLeader(bot))
         return true;
-    if (!AI_VALUE(bool, "dungeon clear enabled"))
+    if (!DcRun::Of(context).enabled)
     {
-        botAI->TellError("Dungeon clear is not enabled.");
+        DcRefuse(botAI, bot, "Dungeon clear is not enabled.");
         return false;
     }
 
@@ -387,46 +398,46 @@ bool DcSkipAction::Execute(Event event)
         {
             uint32 const latchKey = DungeonEventExecutor::ConditionalLatchKey(ev->id);
             auto& cleared =
-                context->GetValue<std::unordered_set<uint32>&>("dungeon clear cleared anchors")->Get();
+                context->GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get();
             cleared.insert(latchKey);
-            context->GetValue<std::unordered_set<uint32>&>("dungeon clear skipped")->Get().insert(latchKey);
-            context->GetValue<std::string&>("dungeon clear stall reason")->Get().clear();
-            context->GetValue<std::string&>("dungeon clear last said reason")->Get().clear();
+            context->GetValue<std::unordered_set<uint32>&>(DcKey::Skipped)->Get().insert(latchKey);
+            context->GetValue<std::string&>(DcKey::StallReason)->Get().clear();
+            context->GetValue<std::string&>(DcKey::LastSaidReason)->Get().clear();
             DcStatusPublisher::SendAddonMessage(botAI, "CHAT\tSkipped event '" + ev->name + "'.");
             botAI->DoSpecificAction("dc status", event, true);
             return true;
         }
     }
 
-    std::optional<DungeonBossInfo> current = AI_VALUE(std::optional<DungeonBossInfo>, "next dungeon boss");
+    std::optional<DungeonBossInfo> current = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
     if (!current.has_value())
     {
-        botAI->TellError("No current boss to skip.");
+        DcRefuse(botAI, bot, "No current boss to skip.");
         return false;
     }
 
     std::unordered_set<uint32>& skipped =
-        context->GetValue<std::unordered_set<uint32>&>("dungeon clear skipped")->Get();
+        context->GetValue<std::unordered_set<uint32>&>(DcKey::Skipped)->Get();
     skipped.insert(current->entry);
 
     // New target gets a clean slate (abort any in-flight pull on the old target).
     ResetPullTransient(context);
-    context->GetValue<uint32>("dungeon clear selected boss")->Set(0u);
+    DcRun::Of(context).selectedBossEntry = 0u;
     // New target gets a clean approach FSM: counters, latches, loot-yield anchor,
     // position sentinel + committed boss, and the long-path cache (so the next
     // Advance tick rebuilds the route for the new target) all reset in lockstep.
-    context->GetValue<DcApproachState&>("dungeon clear approach state")->Get().Reset();
-    context->GetValue<std::string&>("dungeon clear stall reason")->Get().clear();
-    context->GetValue<std::string&>("dungeon clear last said reason")->Get().clear();
-    context->GetValue<ObjectGuid>("dungeon clear fallback target")->Set(ObjectGuid::Empty);
-    context->GetValue<ObjectGuid>("dungeon clear engage trash target")->Set(ObjectGuid::Empty);
-    context->GetValue<uint32>("dungeon clear current hop")->Set(0u);
-    context->GetValue<ChunkedPathfinder::Result&>("dungeon clear long path")->Reset();
-    context->GetValue<DungeonFollowerState&>("dungeon clear follower state")->Get() = DungeonFollowerState{};
+    context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get().Reset();
+    context->GetValue<std::string&>(DcKey::StallReason)->Get().clear();
+    context->GetValue<std::string&>(DcKey::LastSaidReason)->Get().clear();
+    context->GetValue<ObjectGuid>(DcKey::FallbackTarget)->Set(ObjectGuid::Empty);
+    context->GetValue<ObjectGuid>(DcKey::EngageTrashTarget)->Set(ObjectGuid::Empty);
+    context->GetValue<uint32>(DcKey::CurrentHop)->Set(0u);
+    context->GetValue<ChunkedPathfinder::Result&>(DcKey::LongPath)->Reset();
+    context->GetValue<DungeonFollowerState&>(DcKey::FollowerState)->Get() = DungeonFollowerState{};
 
     // Force the cached next-boss value to recompute on next call.
-    context->GetValue<std::optional<DungeonBossInfo>>("next dungeon boss")->Reset();
-    std::optional<DungeonBossInfo> after = AI_VALUE(std::optional<DungeonBossInfo>, "next dungeon boss");
+    context->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Reset();
+    std::optional<DungeonBossInfo> after = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
 
     if (after.has_value())
     {
@@ -435,7 +446,7 @@ bool DcSkipAction::Execute(Event event)
     else
     {
         DcStatusPublisher::SendAddonMessage(botAI, "CHAT\tSkipped " + current->name + ". No bosses left \xe2\x80\x94 disabling.");
-        context->GetValue<bool>("dungeon clear enabled")->Set(false);
+        DcRun::Of(context).enabled = false;
         DcStatusPublisher::UnmarkActiveTank(bot->GetGUID());
     }
 
@@ -453,10 +464,10 @@ bool DcStatusAction::Execute(Event event)
     if (!DcLeaderSignal::IsDungeonClearLeader(bot))
         return true;
 
-    bool const enabled = AI_VALUE(bool, "dungeon clear enabled");
-    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, "next dungeon boss");
-    auto const& skipped = AI_VALUE(std::unordered_set<uint32>&, "dungeon clear skipped");
-    std::string const& stall = AI_VALUE(std::string&, "dungeon clear stall reason");
+    bool const enabled = DcRun::Of(context).enabled;
+    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
+    auto const& skipped = AI_VALUE(std::unordered_set<uint32>&, DcKey::Skipped);
+    std::string const& stall = AI_VALUE(std::string&, DcKey::StallReason);
 
     std::string const param = event.getParam();
     bool const silent = (param == "addon" || param == "silent");
@@ -496,7 +507,7 @@ bool DcBossesAction::Execute(Event event)
     // completed objective/event as "Done" until the player toggles dc on.
     DcTargeting::ResetCompletionLatchesForNewInstance(bot, context);
 
-    auto const& bosses = AI_VALUE(std::vector<DungeonBossInfo>, "dungeon bosses");
+    auto const& bosses = AI_VALUE(std::vector<DungeonBossInfo>, DcKey::DungeonBosses);
 
     std::string const param = event.getParam();
     bool const silent = (param == "addon" || param == "silent");
@@ -511,9 +522,9 @@ bool DcBossesAction::Execute(Event event)
         return true;
     }
 
-    auto const& skipped = AI_VALUE(std::unordered_set<uint32>&, "dungeon clear skipped");
-    auto const& cleared = AI_VALUE(std::unordered_set<uint32>&, "dungeon clear cleared anchors");
-    auto& seen = AI_VALUE(std::unordered_set<uint32>&, "dungeon clear seen bosses");
+    auto const& skipped = AI_VALUE(std::unordered_set<uint32>&, DcKey::Skipped);
+    auto const& cleared = AI_VALUE(std::unordered_set<uint32>&, DcKey::ClearedAnchors);
+    auto& seen = AI_VALUE(std::unordered_set<uint32>&, DcKey::SeenBosses);
 
     // The completed-encounter mask is the authoritative "the group killed it"
     // signal: Map::UpdateEncounterState (driven from KillRewarder) flips bit
@@ -566,8 +577,11 @@ bool DcBossesAction::Execute(Event event)
     {
         return ev->panelTeam != TEAM_NEUTRAL && ev->panelTeam != myTeam;
     };
+    // Difficulty-gated events are hidden from the other difficulty's panel.
+    Difficulty const panelDifficulty =
+        bot->GetMap() ? bot->GetMap()->GetDifficulty() : DUNGEON_DIFFICULTY_NORMAL;
 
-    for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(bot->GetMapId()))
+    for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(bot->GetMapId(), panelDifficulty))
     {
         if (hiddenForTeam(ev))
             continue;
@@ -761,7 +775,7 @@ bool DcBossesAction::Execute(Event event)
     // line with a synthetic entry (the latch key); status is the latch state.
     // Room-aggro pre-clears sort just before their boss (see above); every other
     // off-path event uses index 99 so it sorts last.
-    for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(bot->GetMapId()))
+    for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(bot->GetMapId(), panelDifficulty))
     {
         // Faction-specific events are hidden from the other team's panel.
         if (hiddenForTeam(ev))
@@ -861,27 +875,27 @@ bool DcGoAction::Execute(Event event)
 {
     if (!IsAuthorized(bot, event))
     {
-        botAI->TellError("Not authorized to run go command");
+        DcRefuse(botAI, bot, "Not authorized to run go command");
         return false;
     }
     // Leader owns the run; non-leaders reached via the chat-keyword fan-out
     // stay quiet (the command/addon path already targets only the leader).
     if (!DcLeaderSignal::IsDungeonClearLeader(bot))
         return true;
-    if (!AI_VALUE(bool, "dungeon clear enabled"))
+    if (!DcRun::Of(context).enabled)
     {
-        botAI->TellError("Dungeon clear is not enabled. Please enable it first.");
+        DcRefuse(botAI, bot, "Dungeon clear is not enabled. Please enable it first.");
         return false;
     }
 
     std::string const param = event.getParam();
     if (param.empty())
     {
-        botAI->TellError("Usage: .dc go <boss name or entry>");
+        DcRefuse(botAI, bot, "Usage: .dc go <boss name or entry>");
         return false;
     }
 
-    auto const& bosses = AI_VALUE(std::vector<DungeonBossInfo>, "dungeon bosses");
+    auto const& bosses = AI_VALUE(std::vector<DungeonBossInfo>, DcKey::DungeonBosses);
     DungeonBossInfo const* matched = nullptr;
 
     bool isNumeric = !param.empty() && std::all_of(param.begin(), param.end(), ::isdigit);
@@ -925,7 +939,9 @@ bool DcGoAction::Execute(Event event)
     {
         std::string query = param;
         std::transform(query.begin(), query.end(), query.begin(), ::tolower);
-        for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(bot->GetMapId()))
+        Difficulty const goDifficulty =
+            bot->GetMap() ? bot->GetMap()->GetDifficulty() : DUNGEON_DIFFICULTY_NORMAL;
+        for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(bot->GetMapId(), goDifficulty))
         {
             bool keyMatch = isNumeric &&
                 std::stoul(param) == DungeonEventExecutor::ConditionalLatchKey(ev->id);
@@ -945,7 +961,7 @@ bool DcGoAction::Execute(Event event)
 
             if (!matched)
             {
-                botAI->TellError(ev->name +
+                DcRefuse(botAI, bot, ev->name +
                                  " happens on the way — there's no separate spot to send the tank to.");
                 return false;
             }
@@ -955,14 +971,14 @@ bool DcGoAction::Execute(Event event)
 
     if (!matched)
     {
-        botAI->TellError("Could not find boss matching: " + param);
+        DcRefuse(botAI, bot, "Could not find boss matching: " + param);
         return false;
     }
 
     if (matched->kind == DungeonAnchorKind::Objective &&
-        AI_VALUE(std::unordered_set<uint32>&, "dungeon clear cleared anchors").count(matched->entry))
+        AI_VALUE(std::unordered_set<uint32>&, DcKey::ClearedAnchors).count(matched->entry))
     {
-        botAI->TellError("Objective " + matched->name + " is already done.");
+        DcRefuse(botAI, bot, "Objective " + matched->name + " is already done.");
         return false;
     }
 
@@ -971,7 +987,7 @@ bool DcGoAction::Execute(Event event)
     if (matched->kind == DungeonAnchorKind::Boss &&
         matched->encounterIndex < 32 && (completedMask & (1u << matched->encounterIndex)))
     {
-        botAI->TellError("Boss " + matched->name + " is already dead (encounter complete).");
+        DcRefuse(botAI, bot, "Boss " + matched->name + " is already dead (encounter complete).");
         return false;
     }
 
@@ -993,36 +1009,36 @@ bool DcGoAction::Execute(Event event)
     }
     if (present && !alive)
     {
-        botAI->TellError("Boss " + matched->name + " is dead.");
+        DcRefuse(botAI, bot, "Boss " + matched->name + " is dead.");
         return false;
     }
 
     std::unordered_set<uint32>& skipped =
-        context->GetValue<std::unordered_set<uint32>&>("dungeon clear skipped")->Get();
+        context->GetValue<std::unordered_set<uint32>&>(DcKey::Skipped)->Get();
     skipped.erase(matched->entry);
 
-    context->GetValue<uint32>("dungeon clear selected boss")->Set(matched->entry);
+    DcRun::Of(context).selectedBossEntry = matched->entry;
 
     // Explicitly targeting a boss is a "go now" intent — clear any pause so the
     // tank actually starts moving toward it instead of holding.
-    context->GetValue<bool>("dungeon clear paused")->Set(false);
+    DcRun::Of(context).paused = false;
     // Abort any in-flight pull on the old target before routing to the new one.
     ResetPullTransient(context);
 
     // Route to the new target with a clean approach FSM: counters, latches,
     // loot-yield anchor, position sentinel + committed boss, and the long-path
     // cache (forcing a rebuild for the new target) all reset in lockstep.
-    context->GetValue<DcApproachState&>("dungeon clear approach state")->Get().Reset();
-    context->GetValue<uint32>("dungeon clear current hop")->Set(0u);
-    context->GetValue<ChunkedPathfinder::Result&>("dungeon clear long path")->Reset();
-    context->GetValue<DungeonFollowerState&>("dungeon clear follower state")->Get() = DungeonFollowerState{};
+    context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get().Reset();
+    context->GetValue<uint32>(DcKey::CurrentHop)->Set(0u);
+    context->GetValue<ChunkedPathfinder::Result&>(DcKey::LongPath)->Reset();
+    context->GetValue<DungeonFollowerState&>(DcKey::FollowerState)->Get() = DungeonFollowerState{};
 
-    context->GetValue<std::string&>("dungeon clear stall reason")->Get().clear();
-    context->GetValue<std::string&>("dungeon clear last said reason")->Get().clear();
-    context->GetValue<ObjectGuid>("dungeon clear fallback target")->Set(ObjectGuid::Empty);
-    context->GetValue<ObjectGuid>("dungeon clear engage trash target")->Set(ObjectGuid::Empty);
+    context->GetValue<std::string&>(DcKey::StallReason)->Get().clear();
+    context->GetValue<std::string&>(DcKey::LastSaidReason)->Get().clear();
+    context->GetValue<ObjectGuid>(DcKey::FallbackTarget)->Set(ObjectGuid::Empty);
+    context->GetValue<ObjectGuid>(DcKey::EngageTrashTarget)->Set(ObjectGuid::Empty);
 
-    context->GetValue<std::optional<DungeonBossInfo>>("next dungeon boss")->Reset();
+    context->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Reset();
 
     // Kill any parked escort glide before building the route to the new target
     // (see HaltAllMovement) so the tank doesn't coast down the old path first.
@@ -1038,7 +1054,7 @@ bool DcPauseAction::Execute(Event event)
 {
     if (!IsAuthorized(bot, event))
     {
-        botAI->TellError("Not authorized to pause dungeon clear");
+        DcRefuse(botAI, bot, "Not authorized to pause dungeon clear");
         return false;
     }
 
@@ -1047,13 +1063,26 @@ bool DcPauseAction::Execute(Event event)
     if (!DcLeaderSignal::IsDungeonClearLeader(bot))
         return true;
 
-    if (!AI_VALUE(bool, "dungeon clear enabled"))
+    if (!DcRun::Of(context).enabled)
     {
-        botAI->TellError("Dungeon clear is not enabled.");
+        DcRefuse(botAI, bot, "Dungeon clear is not enabled.");
         return false;
     }
 
-    bool const paused = AI_VALUE(bool, "dungeon clear paused");
+    bool const paused = DcRun::Of(context).paused;
+
+    // Explicit intent ("dc pause pause" / "dc pause resume", sent by the addon
+    // button): a bare `dc pause` is a stateless TOGGLE, which races the
+    // auto-pause sites — a click aimed at "Pause" that lands just after the run
+    // auto-paused (door, wait-at-boss) reads the flipped flag and RESUMES, and
+    // vice versa. With an intent that already holds, do nothing but re-push
+    // status so the addon's button label resyncs. Chat stays a plain toggle.
+    std::string const intent = event.getParam();
+    if ((intent == "pause" && paused) || (intent == "resume" && !paused))
+    {
+        botAI->DoSpecificAction("dc status", event, true);
+        return true;
+    }
 
     if (!paused)
     {
@@ -1061,14 +1090,14 @@ bool DcPauseAction::Execute(Event event)
         // follow-tank party-tank lookup all gate on this flag, so the tank
         // stops navigating and followers peel off — exactly like dc off — but
         // all boss progress is preserved for resume.
-        context->GetValue<bool>("dungeon clear paused")->Set(true);
+        DcRun::Of(context).paused = true;
         // Record why so the status panel can distinguish a manual pause from the
         // tank auto-pausing on a door it can't open. Read by BuildStatusPayload.
-        context->GetValue<std::string&>("dungeon clear pause reason")->Get() =
+        DcRun::Of(context).pauseReason =
             "paused at your request";
         // A manual hold is never tied to a door — clear any stale auto-paused
         // door so opening some unrelated door can't auto-resume this pause.
-        context->GetValue<ObjectGuid>("dungeon clear paused door")->Set(ObjectGuid::Empty);
+        DcRun::Of(context).pausedDoor = ObjectGuid::Empty;
         // Abort any in-flight pull so the party is released as we hold (the reaper
         // un-passives once the phase is no longer holding). Pull mode itself is
         // kept so resume re-enables the feature.
@@ -1086,10 +1115,11 @@ bool DcPauseAction::Execute(Event event)
     }
 
     // Resume on the same boss. Refuse if anyone is dead (mirrors dc on) so we
-    // don't unpause straight into a wipe.
-    if (AnyPartyMemberDead(bot))
+    // don't unpause straight into a wipe — unless the post-combat rez flow can
+    // recover them, in which case resuming hands the corpse to the recovery.
+    if (AnyPartyMemberDead(bot) && !DcRezRecovery::CanRecover(bot))
     {
-        botAI->TellError(FirstDeadName(bot) + " is dead — rez and try again.");
+        DcRefuse(botAI, bot, FirstDeadName(bot) + " is dead — rez and try again.");
         return false;
     }
 
@@ -1097,7 +1127,7 @@ bool DcPauseAction::Execute(Event event)
     // progress is preserved (see ResetForResume).
     ResetForResume(context);
 
-    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, "next dungeon boss");
+    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
     std::string const target = next.has_value() ? next->name : "the next boss";
     DcStatusPublisher::SendAddonMessage(botAI, "CHAT\tResumed. Heading to " + target + ".");
     botAI->DoSpecificAction("dc status", event, true);
@@ -1110,18 +1140,19 @@ bool DcResumeOnDoorOpenedAction::Execute(Event event)
     // the leader via the multiplier / party-tank value.
     if (!DcLeaderSignal::IsDungeonClearLeader(bot))
         return false;
-    if (!AI_VALUE(bool, "dungeon clear enabled") || !AI_VALUE(bool, "dungeon clear paused"))
+    if (!DcRun::Of(context).enabled || !DcRun::Of(context).paused)
         return false;
 
     // Don't unpause straight into a wipe (mirrors `dc on` / the manual resume).
     // The trigger keeps firing while the door stays open, so this retries on its
-    // own once everyone is back up.
-    if (AnyPartyMemberDead(bot))
+    // own once everyone is back up — or resumes at once when the post-combat rez
+    // flow can recover the corpse (the resumed run immediately holds for it).
+    if (AnyPartyMemberDead(bot) && !DcRezRecovery::CanRecover(bot))
         return false;
 
     ResetForResume(context);
 
-    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, "next dungeon boss");
+    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
     std::string const target = next.has_value() ? next->name : "the next boss";
     DcStatusPublisher::SendAddonMessage(
         botAI, "CHAT\tDoor opened \xe2\x80\x94 resuming. Heading to " + target + ".");
@@ -1133,7 +1164,7 @@ bool DcPullAction::Execute(Event event)
 {
     if (!IsAuthorized(bot, event))
     {
-        botAI->TellError("Not authorized to toggle advanced pull");
+        DcRefuse(botAI, bot, "Not authorized to toggle advanced pull");
         return false;
     }
 
@@ -1145,13 +1176,13 @@ bool DcPullAction::Execute(Event event)
     // Pull mode is settable BEFORE the run starts: when DC is off we just store
     // the preference (no live arming — there's no run to arm) and `dc on` applies
     // it the moment the run begins. When DC is on we apply it live.
-    bool const enabled = AI_VALUE(bool, "dungeon clear enabled");
+    bool const enabled = DcRun::Of(context).enabled;
 
     // Tri-state preference: 0 Off, 1 On, 2 Dynamic (see DungeonClearPullSetting-
     // Value). The addon sends an explicit "off"/"on"/"dynamic"; a bare toggle
     // cycles Off -> On -> Dynamic -> Off for the chat keyword / .dc pull case.
     std::string const param = event.getParam();
-    uint32 const current = AI_VALUE(uint32, "dungeon clear pull setting");
+    uint32 const current = AI_VALUE(uint32, DcKey::PullSetting);
     uint32 setting;
     if (param == "off")
         setting = 0u;
@@ -1178,7 +1209,7 @@ bool DcPullAction::Execute(Event event)
     else
     {
         // Run not started — remember the preference only; `dc on` applies it.
-        context->GetValue<uint32>("dungeon clear pull setting")->Set(setting);
+        context->GetValue<uint32>(DcKey::PullSetting)->Set(setting);
         DC_PULL_INFO("[DC:{}] advanced-pull mode pre-set to {} by {} (applies on dc on)",
                      bot->GetName(), label, param.empty() ? "toggle" : param);
     }

@@ -11,6 +11,7 @@
 
 class Player;
 class Creature;
+class GameObject;
 class AiObjectContext;
 
 // Result of running ONE event step on a tick.
@@ -43,12 +44,38 @@ struct DungeonEventProgress
     uint32 lastDriveMs{0};  // ms-time Drive last ran this event (gap detector)
     uint32 instanceId{0};   // instance this progress belongs to (new-instance reset)
 
+    // Forward-progress watchdog, independent of stepStartMs.
+    //
+    // stepStartMs is the timeout base for the ACTIVE step, and it is re-stamped
+    // every time a step reports Done — including the harmless re-Done of an
+    // already-satisfied leading MoveTo after a stale-gap rewind. So a rewind loop
+    // (rewind -> MoveTo Done -> step 1 -> rewind -> ...) keeps stepStartMs fresh
+    // forever and the step timeout in Advance can never fire: the event runs
+    // Running for the whole instance with no stall, no retry, and no log. That is
+    // exactly how Steamvault's access-panel event wedged (see Drive).
+    //
+    // These two fields measure something a rewind cannot forge: the HIGH-WATER
+    // step index and when it last actually increased. Oscillating between steps
+    // 0 and 1 never raises the high-water mark, so the wedge is caught even when
+    // every other clock keeps being reset. Re-stamped on a genuine (re)activation
+    // — new event, new instance, real lapse — so a legitimately dormant event
+    // (persistent, driven only between fights) is never charged for the gap.
+    uint32 maxStepIndex{0};  // highest stepIndex reached this activation
+    uint32 progressMs{0};    // ms-time maxStepIndex last increased (or activation)
+
     // EscortCreature watchdog: ms-time the escort last made genuine progress
     // (escortee moved, combat occurred, a reachable threat existed, or the final
     // boss is pending within grace). The escort step has no flat timeout (the
     // 32.5s banish channel + the long ritual would mis-fire one); this is its
     // dead-air liveness clock instead. 0 => unset (stamped on the first tick).
     uint32 escortProgressMs{0};
+
+    // EscortCreature combat-wedge clock: ms-time the escortee was first seen IN
+    // COMBAT with no attacker and no valid attack target (Old Hillsbrad: Thrall's
+    // scripted Knockout on the unattackable Durnholde Armorer — upstream #25617).
+    // Held for a debounce window before the driver force-clears the combat, so a
+    // transient real-combat transition can never trip it. 0 => not wedged.
+    uint32 escortCombatWedgeMs{0};
 
     // Drive-log throttle: the per-tick step line is logged only on a transition
     // (step or result change) or every kLogHeartbeatMs while Running, so a long
@@ -65,7 +92,10 @@ struct DungeonEventProgress
         attempts = 0;
         lastDriveMs = 0;
         instanceId = 0;
+        maxStepIndex = 0;
+        progressMs = 0;
         escortProgressMs = 0;
+        escortCombatWedgeMs = 0;
         lastLoggedStep = -1;
         lastLoggedResult = -1;
         lastLogMs = 0;
@@ -110,6 +140,15 @@ public:
     // matters) facing the NPC.
     static bool SelectGossip(Player* bot, Creature* npc, int32 option);
 
+    // Static-geometry (vmap-only) line of sight from the bot to a step's
+    // GameObject, eye-bumped on both ends. Shared by the UseItemOnGO RunStep and
+    // its approach driver (DriveUseItemOnGO) so "arrived" means the SAME thing in
+    // both: in reach AND visible. Vmap-only because the check must see through
+    // other dynamic GOs but never through a house wall — a bot standing within
+    // cast reach of a barrel on the FAR SIDE of a wall would otherwise spam-cast
+    // through it forever (live deadlock).
+    static bool HasGameObjectLos(Player* bot, GameObject* go);
+
     // --- Conditional activation (milestone 2) ----------------------------
 
     // Synthetic "dungeon clear cleared anchors" latch key for a Conditional
@@ -123,11 +162,18 @@ public:
     }
 
     // IMPURE: the first un-latched Conditional event registered for `mapId`
-    // whose EventConditionRegistry predicate is currently true; nullptr if none
+    // whose activation predicate (DungeonEvent::condition) is currently true; nullptr if none
     // is due. Shared by the conditional-event trigger (gate) and DcRunEventAction
     // (driver) so the two never disagree about which event is active.
+    //
+    // `requireDrivesInCombat` restricts the search to events flagged
+    // DungeonEvent::drivesInCombat. The COMBAT-engine copy of the rung passes true,
+    // so it can only ever drive an event that opted in to being steered under fire
+    // — a normal conditional event stays the non-combat engine's business and the
+    // stock combat engine keeps every fight it owns today.
     static DungeonEvent const* FindDueConditionalEvent(Player* bot, AiObjectContext* context,
-                                                       uint32 mapId);
+                                                       uint32 mapId,
+                                                       bool requireDrivesInCombat = false);
 
     // IMPURE: detect conditional events whose completion is signalled by their
     // own gating condition going false (instance state, not a ConditionalLatchKey)
@@ -154,6 +200,28 @@ public:
     // Reads the run's "next dungeon boss" + "dungeon clear event progress" values,
     // so pass the context of the bot whose run state you mean (the leader's).
     static bool IsPersistentAnchoredEventActive(AiObjectContext* context);
+
+    // If `context`'s current objective drives an event with a KillCreature ENGAGE
+    // step (KillCreatureEngage — .engage set), report true and fill `outEntry` /
+    // `outSearchRadius` with the creature entry to seek and the radius to seek it
+    // in. Pure lookup of the run's "next dungeon boss" + "event progress" values
+    // against the registry; no world state. Used by both the non-combat objective
+    // driver and the combat-side stealth-sapper rung so they seek the same target.
+    //
+    // `anyStep` controls WHICH step is consulted:
+    //   * false (default): only the ACTIVE step (the idx=(matching?stepIndex:0)
+    //     fallback used in DcObjectiveArriveAction — a stale/foreign progress
+    //     resolves to step 0). Returns false when the active step is a MoveTo/gate.
+    //   * true: the active step is preferred if it IS an engage step, else the
+    //     event is SCANNED for its first engage step. The combat-side stealth-
+    //     breaker passes true so it can arm during a leading MoveTo (step 0) — the
+    //     window where a stealthed sapper flags the party into combat BEFORE the
+    //     tank reaches the anchor and the non-combat driver advances to the engage
+    //     step. Without this the combat rung stands down for exactly that deadlock.
+    // Returns false (leaving the outs untouched) when the event has no engage step
+    // or there is no active objective event.
+    static bool ActiveEngageStep(AiObjectContext* context, uint32& outEntry,
+                                 float& outSearchRadius, bool anyStep = false);
 };
 
 #endif

@@ -11,11 +11,13 @@
 #include "MovementActions.h"
 #include "Position.h"
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonClearApproach.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 
 class PlayerbotAI;
 class Unit;
 class Creature;
+class Map;
 struct DungeonBossInfo;
 struct EventStep;
 struct DungeonEventProgress;
@@ -41,6 +43,44 @@ protected:
                   bool normal_only = false, bool exact_waypoint = false,
                   MovementPriority priority = MovementPriority::MOVEMENT_NORMAL, bool lessDelay = false,
                   bool backwards = false);
+
+    // Pick a standoff point on a ring around `center`: the first candidate (from
+    // DungeonClearMath::StandoffCandidates, ordered bot-side first) that snaps to
+    // the navmesh (8yd), sits within `maxRadius` (2D) of the center, has VMAP line
+    // of sight to it (at a +2yd eye bump), and is PATHFIND_NORMAL-reachable from the
+    // bot. Writes the accepted point to (x,y,z) and returns true; false if none
+    // validate. Shared by the healer LOS reposition (ring around the hurt target)
+    // and the contribution-gated combat regroup (ring around the fight anchor), so
+    // both park a bot in the same validated band by one implementation.
+    bool FindStandoffPoint(Map* map, Position const& center, float ringRadius,
+                           float maxRadius, float& x, float& y, float& z);
+
+    // What one glide tick did, so the caller can layer its own stall/park
+    // bookkeeping without the driver needing the context.
+    enum class GlideOutcome
+    {
+        Moved,        // issued a fresh movement (jump / rejoin / spline / hop). Own the tick.
+        Riding,       // an in-flight escort glide is still travelling; left alone. Own the tick.
+        ReachedEnd,   // the follower cursor hit the route end — as close as the navmesh allows.
+        OffPathLost,  // knocked off the line and Resnap failed; the cached path was invalidated.
+        Blocked,      // movement isn't allowed this tick.
+    };
+
+    // Drive ONE tick of a continuous escort-spline glide along `path` toward its
+    // end, sharing the exact wedge-detect / off-path-resnap / ride-guard /
+    // jump / off-line-rejoin / spline-window / single-hop-fallback ladder that the
+    // Advance approach FSM runs (DcAdvanceAction's Tier-B/C effect handlers are the
+    // DecideApproach-instrumented sibling of this sequence). Pure movement: it
+    // mutates `follower`/`appr`/`wedgeWatch` and issues the arbiter-funneled moves,
+    // but leaves stall-reason/park bookkeeping to the caller via the returned
+    // outcome. `wedgeWatch` is the caller's progress watchdog (e.g. the door
+    // walk-in vs the advance route-glide instance); `appr.lastPos` carries the
+    // per-tick displacement baseline. This is the shared "DcGlideDriver": any
+    // action that has to walk a bot to the end of a cached route reuses it instead
+    // of hand-cloning the machinery.
+    GlideOutcome DriveGlideToEnd(ChunkedPathfinder::Result const& path,
+                                 DungeonFollowerState& follower, DcApproachState& appr,
+                                 DcProgressWatchdog& wedgeWatch, uint32 mapId, char const* tag);
 };
 
 // Shared base for engage actions: walks into attack range and forces combat
@@ -62,6 +102,15 @@ protected:
     // every EngageDirect consumer (room clear, run-event, stalled fallback)
     // inherits the skirt without its own copy.
     bool EngageDirect(Unit* target);
+
+    // Drive the ACTIVE objective's KillCreature-ENGAGE step (KillCreatureEngage):
+    // find the nearest reachable live creature of the step's entry and EngageDirect
+    // it (long-range walk-in + Attack — no visibility gate, so it breaks a stealthed
+    // target's stealth on the first swing). Returns true when it owned the tick
+    // (moved/attacked); false when there is no active engage step or no reachable
+    // creature of its entry. Shared by the non-combat objective driver and the
+    // combat-side stealth-sapper rung. See DungeonEventExecutor::ActiveEngageStep.
+    bool DriveObjectiveEngage();
 
     // Detour waypoint to approach `target` while skirting an ACTIVE room-aggro
     // boss's aggro sphere, or nullopt when no detour is needed: the direct line
@@ -101,6 +150,39 @@ protected:
     // returns false once the leader is on the deep floor, so the caller falls
     // through to Drive and RunStep's gate pulls the followers down + latches.
     bool DriveDropInHole(EventStep const& step);
+
+    // Drive a UseItemOnGO step's APPROACH (Old Hillsbrad's barrels, one inside each
+    // house). Owns the tick (returns true) while walking the tank to the target GO
+    // via the DC movement system, because the normal at-objective StopBot(Hold)
+    // cancels a plain MovePoint spline every tick — which crawls over open ground
+    // but can never thread a house DOORWAY (the tank stalls at the threshold, "close
+    // but not inside"). Also drives the ANCHOR approach while the pooled GO hasn't
+    // streamed in yet, and closes the last yards with a FORCED-destination walk-in:
+    // the navmesh thins at house walls, so a plain nav move can run dry just outside
+    // cast reach and deadlock (nothing else in the movement stack forces its
+    // destination). Returns false once within cast range, so the caller falls
+    // through to Drive and RunStep fires the GO.
+    bool DriveUseItemOnGO(EventStep const& step);
+
+    // Recovery verdict for a long non-combat set-piece (the Old Hillsbrad barrel
+    // run). The objective drive owns the tick at DcRel::AtObjective (30), which
+    // sits ABOVE the NeedsRest triggers (26.5) — so without an explicit yield the
+    // tank would bomb all five houses without ever drinking, sprinting between
+    // barrels on empty mana. The travel-leg drivers consult this each out-of-
+    // combat tick:
+    //   - Yield : the TANK itself is below its rest target -> the caller returns
+    //             false so its own drink/food action (rel 26.5) wins the tick.
+    //   - Hold  : the tank is topped but the PARTY is still recovering -> stop in
+    //             place and own the tick so followers close up and drink (never
+    //             yield here, or Advance/engage-trash would drag the tank off the
+    //             event when its own rest trigger is inert).
+    //   - None  : nobody needs to rest -> drive on.
+    // In SmartRest mode this also keeps the party-wide hysteresis latch fresh: the
+    // between-pulls gate that normally drives UpdateLatch never runs inside an
+    // event. Never fires mid-cast (won't interrupt an in-flight plant/gossip) or
+    // in combat (the combat engine owns those ticks). See EventRestDecision.
+    enum class EventRest { None, Yield, Hold };
+    EventRest EventRestDecision();
 };
 
 class DungeonClearAdvanceAction : public DcMovementAction
@@ -130,11 +212,17 @@ private:
         ChunkedPathfinder::Result const* path = nullptr;    // resolved after EnsureLongPath
         DungeonFollowerState* follower = nullptr;           // long-path follower cursor
         DungeonPathFollower::Hop hop;                       // current hop (single NextHop)
+
+        // Values carried from observation-assembly into the matching effect
+        // handler so the handler need not re-derive them (and cannot drift):
+        uint32 offPathTicks = 0;                 // off-path ticks at a failed Resnap (DoOffPathRebuild log)
+        float  routeDeviation = 0.0f;            // 2D route deviation (DoOffLineRejoin log)
+        std::vector<G3D::Vector3> splineWindow;  // the >=2-pt window (DoIssueSplineWindow)
     };
 
     // A phase step either handles the tick (Execute returns the carried bool)
-    // or falls through to the next phase. Keeps Execute a short, readable ladder
-    // of Try* rungs instead of one 750-line method.
+    // or falls through to the next phase. DoPursue additionally uses Continue to
+    // signal "pursuit abdicated this tick — hand off to the long-path below".
     enum class Step { Continue, ReturnTrue, ReturnFalse };
 
     // Pre-route phases (boss snapshot only).
@@ -143,19 +231,30 @@ private:
     Step TryBetweenPullsRest(AdvanceState const& st);
     Step TryBossNotPresentStall(AdvanceState const& st);
 
-    // Counter-coupled tail, now extracted in declared order. These read/write
-    // the shared approach state, long-path, follower, and hop carried in st.
-    Step TryPosStuckRecovery(AdvanceState& st);
-    Step TryDirectPursuit(AdvanceState& st);
-    Step TryLongPathUnreachable(AdvanceState& st);
-    Step TryOffPathResnap(AdvanceState& st);
+    // Single-observation approach tail (fable2 T2.2 / nav F10). Execute assembles
+    // ONE DungeonClearApproach::Observation across three lazy stages (so the
+    // action still defers the long-path build and NextHop exactly as before),
+    // consults the pure DecideApproach as the sole owner of the ladder order, and
+    // dispatches the verdict to the matching effect handler below. The Fill*
+    // helpers gather the observation (and carry every per-tick bookkeeping side
+    // effect — the stuck/pursuit counters, the off-path Resnap, the escalation
+    // counter). The Do* handlers are pure effects: their guard is the verdict.
+    void FillStuckObs(AdvanceState& st, DungeonClearApproach::Observation& obs);   // Tier A
+    void FillPursuitObs(AdvanceState& st, DungeonClearApproach::Observation& obs); // Tier A
+    void FillPathObs(AdvanceState& st, DungeonClearApproach::Observation& obs);    // Tier B
+    void FillHopObs(AdvanceState& st, DungeonClearApproach::Observation& obs);     // Tier C
+
+    Step DoStuckRecover(AdvanceState& st);
+    Step DoPursue(AdvanceState& st);                 // Continue = hand off to the long-path
+    Step DoLongPathUnreachable(AdvanceState& st);    // PlanRouteWait / FarFromPoly / Swim / Stall
+    Step DoOffPathRebuild(AdvanceState& st);
     Step TryReanchorStaleCursor(AdvanceState& st);   // never terminates; only re-anchors the cursor
-    Step TryHopDoneEscalation(AdvanceState& st);
-    Step TryJumpLeg(AdvanceState& st);
-    Step TryRideLiveGlide(AdvanceState& st);
-    Step TryOffLineRejoin(AdvanceState& st);
-    Step TrySplineWindowIssue(AdvanceState& st);
-    Step TryMoveToFallback(AdvanceState& st);        // terminal: always handles the tick
+    Step DoHopDoneEscalation(AdvanceState& st, DungeonClearApproach::Verdict v);
+    Step DoJumpLeg(AdvanceState& st);
+    Step DoRideLiveGlide(AdvanceState& st);
+    Step DoOffLineRejoin(AdvanceState& st);
+    Step DoIssueSplineWindow(AdvanceState& st);
+    Step DoMoveToFallback(AdvanceState& st);         // terminal: always handles the tick
 };
 
 class DungeonClearEngageTrashAction : public DungeonClearEngageActionBase
@@ -274,6 +373,29 @@ public:
     bool Execute(Event event) override;
 };
 
+// ALL bots, non-combat — paired with DungeonClearRezPartyTrigger (which fires
+// only on the elected rezzer). Walks the rezzer within cast range + line of
+// sight of the first recoverable corpse (target priority: healer > tank >
+// group order) with the module's standard no-force pathing, then casts the
+// class resurrection via DoSpecificAction ("resurrection" / "redemption" /
+// "ancestral spirit" / "revive"). Returns false while the cast is not yet
+// possible (out of mana, target vanished) so the lower rungs — the drink/eat
+// rung at 26.5 in particular — get the tick and the rezzer can afford the
+// cast; the recovery timeout in DcRezRecovery backstops a rezzer that never
+// manages it. The stock class-strategy pairing ("party member dead" -> class
+// rez at rel 40) acts as an independent backup; both converge safely because
+// the stock "party member to resurrect" value excludes targets with a pending
+// rez request or an in-flight rez cast.
+class DungeonClearRezPartyAction : public DcMovementAction
+{
+public:
+    DungeonClearRezPartyAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear rez party")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
 // Drives a travel OBJECTIVE (DungeonAnchorKind::Objective from
 // BossRosterRegistry) once the tank has reached it (DungeonClearAtObjectiveTrigger
 // fired). Runs the objective's declarative event (DungeonEventRegistry) or its
@@ -317,6 +439,52 @@ public:
     {
     }
     bool Execute(Event event) override;
+
+protected:
+    DcRunEventAction(PlayerbotAI* botAI, std::string const& name, bool requireDrivesInCombat)
+        : DungeonClearEngageActionBase(botAI, name), _requireDrivesInCombat(requireDrivesInCombat)
+    {
+    }
+    // Passed to DungeonEventExecutor::FindDueConditionalEvent so the combat copy
+    // can only ever pick up an event that opted in (DungeonEvent::drivesInCombat).
+    bool _requireDrivesInCombat{false};
+};
+
+// COMBAT-engine sibling of DcRunEventAction: the same step driver, selected by
+// DungeonClearEventDueCombatTrigger and restricted to events flagged
+// DungeonEvent::drivesInCombat. Registered in DungeonClearCombatStrategy at
+// DcRel::EventDueCombat — above the stock combat movers, so a wave encounter's
+// driver can actually reposition the tank mid-fight (walk it to the next rift)
+// instead of being frozen out for the whole encounter. See
+// DungeonEvent::drivesInCombat for why the non-combat-only rung was not enough.
+class DcRunEventCombatAction : public DcRunEventAction
+{
+public:
+    DcRunEventCombatAction(PlayerbotAI* botAI)
+        : DcRunEventAction(botAI, "dungeon clear run event combat", /*requireDrivesInCombat*/ true)
+    {
+    }
+};
+
+// COMBAT-engine sibling of the objective KillCreature-engage driver. A stealthed
+// mob (Shattered Halls' Shattered Hand Assassins) can Sap the tank: the sap flags
+// the party into combat AND the mob stays/re-stealthed, so once the incapacitate
+// wears off stock combat has no detectable victim and the run wedges "in combat,
+// nothing to hit". The non-combat DcObjectiveArriveAction engage branch can't run
+// then (combat owns the engine), so this drives the same DriveObjectiveEngage()
+// from the combat engine: walk the tank onto the undetected sapper by ENTRY and
+// Attack it, breaking stealth on the first swing. Gated (in the trigger) to fire
+// only while an engage objective is active and an undetected, reachable creature
+// of its entry sits nearby; inert the instant it becomes detectable, handing the
+// kill back to stock combat.
+class DcObjectiveEngageCombatAction : public DungeonClearEngageActionBase
+{
+public:
+    DcObjectiveEngageCombatAction(PlayerbotAI* botAI)
+        : DungeonClearEngageActionBase(botAI, "dungeon clear objective engage combat")
+    {
+    }
+    bool Execute(Event event) override;
 };
 
 class DungeonClearDisableOnDeathAction : public Action
@@ -330,6 +498,31 @@ class DungeonClearDisableOnClearedAction : public Action
 {
 public:
     DungeonClearDisableOnClearedAction(PlayerbotAI* botAI) : Action(botAI, "dungeon clear disable on cleared") {}
+    bool Execute(Event event) override;
+};
+
+// Phantom-combat escape hatch. Fired by DungeonClearBreakStuckCombatTrigger once a
+// DC member has been flagged in combat with nothing fightable (no attacker, no
+// victim, no reachable holder) for DungeonClear.StuckCombatTimeout seconds. Force-
+// clears the bot's combat AND drops it from every threat list — the same effect as a
+// GM `.combatstop`, which is what unwedges a member ghost-flagged by a mob that
+// spawned far away / behind a gate. The gating all lives in the trigger; this action
+// is the unconditional recovery.
+class DungeonClearBreakStuckCombatAction : public Action
+{
+public:
+    DungeonClearBreakStuckCombatAction(PlayerbotAI* botAI) : Action(botAI, "dungeon clear break stuck combat") {}
+    bool Execute(Event event) override;
+};
+
+// Stranded-member recovery failsafe. Paired with DungeonClearRecoverStrandedTrigger
+// (which fires only on the leader once the run has frozen for the configured window
+// with a bot member out of range): teleports every stuck bot member to the tank and
+// re-arms the no-progress clock. See DcStrandedRecovery.
+class DungeonClearRecoverStrandedAction : public Action
+{
+public:
+    DungeonClearRecoverStrandedAction(PlayerbotAI* botAI) : Action(botAI, "dungeon clear recover stranded") {}
     bool Execute(Event event) override;
 };
 
@@ -477,10 +670,13 @@ public:
     }
 };
 
-// Combat engine: a follower that has drifted too far from, or out of LOS of, the
-// leader tank during a fight. Closes back on the tank (stopping a few yards short)
-// so the party stays grouped and a stranded healer regains line of sight to its
-// heal target. Driven by DungeonClearRegroupCombatTrigger.
+// Combat engine: a follower the contribution gate decided cannot help from where it
+// stands (a DPS with no visible attacker, or a healer parked where it can't heal the
+// tank), or one that drifted past the hard tether. Moves it to a ROLE-CORRECT
+// standoff point with LOS on the fight — a ring point at spell range around the
+// fight anchor for a ranged DPS, a heal-range point around the tank for a healer,
+// a corner-rounding fractional approach for a melee / when no ring point validates —
+// never onto the tank's cell. Driven by DungeonClearRegroupCombatTrigger.
 class DungeonClearRegroupCombatAction : public DcMovementAction
 {
 public:
@@ -489,6 +685,14 @@ public:
     {
     }
     bool Execute(Event event) override;
+
+private:
+    // Re-issue guard: the last destination handed to DcMoveTo. The trigger can
+    // re-fire every tick while latched; re-issuing a near-identical move each time
+    // re-plots the spline and stutters/cast-clips the bot (cf. the spline-reissue
+    // freeze). Skip the move while already travelling toward within 3yd of it.
+    Position _lastDest;
+    bool     _lastDestValid = false;
 };
 
 // Healer-only, BOTH engines. Moves the healer to a point with line of sight AND
@@ -505,6 +709,24 @@ class DungeonClearHealRepositionAction : public DcMovementAction
 public:
     DungeonClearHealRepositionAction(PlayerbotAI* botAI)
         : DcMovementAction(botAI, "dungeon clear heal reposition")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// ANY role, BOTH engines. Moves the bot OUT of an active-vacate hazard emitter's
+// pulse (DcHazard::NearestVacate — the Arcatraz Destroyed Sentinel's 15yd Energy
+// Discharge). Aims a point directly away from the emitter, just past its pulse
+// radius plus slack, snapped to the navmesh, clear of every OTHER hazard, and
+// path-reachable; if the straight-away point is blocked it fans the away-bearing
+// around until one validates. Re-issued each tick. MOVEMENT_COMBAT priority so it
+// overrides the bot's MoveChase / advance. Driven by
+// DungeonClearHazardVacateTrigger.
+class DungeonClearHazardVacateAction : public DcMovementAction
+{
+public:
+    DungeonClearHazardVacateAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear hazard vacate")
     {
     }
     bool Execute(Event event) override;

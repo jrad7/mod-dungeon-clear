@@ -22,13 +22,18 @@ public:
         creators["dungeon clear engage trash"] = &DungeonClearActionContext::engage_trash;
         creators["dungeon clear engage boss"] = &DungeonClearActionContext::engage_boss;
         creators["dungeon clear objective arrive"] = &DungeonClearActionContext::objective_arrive;
+        creators["dungeon clear objective engage combat"] = &DungeonClearActionContext::objective_engage_combat;
         creators["dungeon clear run event"] = &DungeonClearActionContext::run_event;
+        creators["dungeon clear run event combat"] = &DungeonClearActionContext::run_event_combat;
         creators["dungeon clear room clear"] = &DungeonClearActionContext::room_clear;
         creators["dungeon clear room preclear hold"] = &DungeonClearActionContext::room_preclear_hold;
         creators["dungeon clear clear stalled"] = &DungeonClearActionContext::clear_stalled;
         creators["dungeon clear follow tank"] = &DungeonClearActionContext::follow_tank;
         creators["dungeon clear disable on death"] = &DungeonClearActionContext::disable_on_death;
+        creators["dungeon clear rez party"] = &DungeonClearActionContext::rez_party;
         creators["dungeon clear disable on cleared"] = &DungeonClearActionContext::disable_on_cleared;
+        creators["dungeon clear break stuck combat"] = &DungeonClearActionContext::break_stuck_combat;
+        creators["dungeon clear recover stranded"] = &DungeonClearActionContext::recover_stranded;
         creators["dungeon clear door blocked"] = &DungeonClearActionContext::door_blocked;
         creators["dungeon clear door reopened"] = &DungeonClearActionContext::door_reopened;
         creators["dungeon clear filter loot"] = &DungeonClearActionContext::filter_loot;
@@ -41,6 +46,7 @@ public:
         creators["dungeon clear leader assist"] = &DungeonClearActionContext::leader_assist;
         creators["dungeon clear regroup combat"] = &DungeonClearActionContext::regroup_combat;
         creators["dungeon clear heal reposition"] = &DungeonClearActionContext::heal_reposition;
+        creators["dungeon clear hazard vacate"] = &DungeonClearActionContext::hazard_vacate;
         creators["dungeon clear hakkar suppressor"] = &DungeonClearActionContext::hakkar_suppressor;
         creators["dungeon clear hakkar flame"] = &DungeonClearActionContext::hakkar_flame;
         creators["dungeon clear hakkar loot blood"] = &DungeonClearActionContext::hakkar_loot_blood;
@@ -77,13 +83,18 @@ private:
     static Action* engage_trash(PlayerbotAI* ai) { return new DungeonClearEngageTrashAction(ai); }
     static Action* engage_boss(PlayerbotAI* ai) { return new DungeonClearEngageBossAction(ai); }
     static Action* objective_arrive(PlayerbotAI* ai) { return new DcObjectiveArriveAction(ai); }
+    static Action* objective_engage_combat(PlayerbotAI* ai) { return new DcObjectiveEngageCombatAction(ai); }
     static Action* run_event(PlayerbotAI* ai) { return new DcRunEventAction(ai); }
+    static Action* run_event_combat(PlayerbotAI* ai) { return new DcRunEventCombatAction(ai); }
     static Action* room_clear(PlayerbotAI* ai) { return new DungeonClearRoomClearAction(ai); }
     static Action* room_preclear_hold(PlayerbotAI* ai) { return new DungeonClearRoomPreClearHoldAction(ai); }
     static Action* clear_stalled(PlayerbotAI* ai) { return new DungeonClearClearStalledAction(ai); }
     static Action* follow_tank(PlayerbotAI* ai) { return new DungeonClearFollowTankAction(ai); }
     static Action* disable_on_death(PlayerbotAI* ai) { return new DungeonClearDisableOnDeathAction(ai); }
+    static Action* rez_party(PlayerbotAI* ai) { return new DungeonClearRezPartyAction(ai); }
     static Action* disable_on_cleared(PlayerbotAI* ai) { return new DungeonClearDisableOnClearedAction(ai); }
+    static Action* break_stuck_combat(PlayerbotAI* ai) { return new DungeonClearBreakStuckCombatAction(ai); }
+    static Action* recover_stranded(PlayerbotAI* ai) { return new DungeonClearRecoverStrandedAction(ai); }
     static Action* door_blocked(PlayerbotAI* ai) { return new DungeonClearDoorBlockedAction(ai); }
     static Action* door_reopened(PlayerbotAI* ai) { return new DcResumeOnDoorOpenedAction(ai); }
     static Action* filter_loot(PlayerbotAI* ai) { return new DungeonClearFilterLootAction(ai); }
@@ -96,6 +107,7 @@ private:
     static Action* leader_assist(PlayerbotAI* ai) { return new DungeonClearLeaderAssistAction(ai); }
     static Action* regroup_combat(PlayerbotAI* ai) { return new DungeonClearRegroupCombatAction(ai); }
     static Action* heal_reposition(PlayerbotAI* ai) { return new DungeonClearHealRepositionAction(ai); }
+    static Action* hazard_vacate(PlayerbotAI* ai) { return new DungeonClearHazardVacateAction(ai); }
     static Action* hakkar_suppressor(PlayerbotAI* ai) { return new DungeonClearHakkarSuppressorAction(ai); }
     static Action* hakkar_flame(PlayerbotAI* ai) { return new DungeonClearHakkarFlameAction(ai); }
     static Action* hakkar_loot_blood(PlayerbotAI* ai) { return new DungeonClearHakkarLootBloodAction(ai); }

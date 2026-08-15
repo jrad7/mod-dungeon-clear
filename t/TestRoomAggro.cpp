@@ -95,6 +95,80 @@ TEST(RoomAggroRegistryTest, ScholomanceLinkedPairBothFlagged)
     EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*vectus, 10495, 45.0f, 31.0f));
 }
 
+// Mechano-Lord Capacitus (Mechanar, 554) no longer has a room-aggro entry: the
+// boss order was changed to Gyro-Kill -> Capacitus -> Iron-Hand, so the tank
+// approaches his pit from the NW and the SE Driller pack falls on the post-boss
+// walk down to Iron-Hand (plain trash-clear), removing the reason for the
+// pre-clear. Assert the entry is gone so a re-add is a deliberate choice.
+TEST(RoomAggroRegistryTest, MechanarCapacitusHasNoRoomAggroEntry)
+{
+    EXPECT_EQ(RoomAggroRegistry::Find(554, 19219), nullptr);
+}
+
+// Nethermancer Sepethrea (Mechanar, 554) IS a room-aggro boss: her chamber holds
+// three elite trash groups pre-cleared and dragged back toward the entrance before
+// the pull. radius 70 covers the farthest (Pack A ~67yd); pullOutRadius 14 shrinks
+// the room-trash exclusion so Pack B — parked ~17yd out, inside her ~28yd real
+// aggro sphere — is KEPT as clearable trash instead of coming with the boss.
+TEST(RoomAggroRegistryTest, MechanarSepethreaHasPullOutRoom)
+{
+    RoomAggroBoss const* sep = RoomAggroRegistry::Find(554, 19221);
+    ASSERT_NE(sep, nullptr);
+    EXPECT_FLOAT_EQ(sep->radius, 70.0f);
+    EXPECT_TRUE(sep->memberEntries.empty());   // any hostile in the chamber
+    EXPECT_FALSE(sep->hasYBand);
+    EXPECT_GT(sep->pullOutRadius, 0.0f);        // the coupled shrink is set
+    EXPECT_LT(sep->pullOutRadius, 17.0f);       // below Pack B's nearest member (17.3yd)
+    // The fight-standoff skirt is WIDENED past her raw ~28yd sphere so the dragged
+    // pack is fought clear of her aggro/CallForHelp (and the open floor her Raging
+    // Flames roam), yet stays DECOUPLED from the exclusion (pullOutRadius).
+    EXPECT_GT(sep->skirtRadius, 28.0f);
+    EXPECT_GT(sep->skirtRadius, sep->pullOutRadius);
+}
+
+// SkirtOverride returns the row's widened skirt for a flagged boss and 0 elsewhere,
+// so RoomAggroSphereRadius (which maxes the computed sphere against it) widens ONLY
+// for the flagged boss. Pandemonius carries no override -> 0 (computed sphere alone).
+TEST(RoomAggroRegistryTest, SkirtOverrideOnlyForFlaggedRow)
+{
+    EXPECT_FLOAT_EQ(RoomAggroRegistry::SkirtOverride(554, 19221),
+                    RoomAggroRegistry::Find(554, 19221)->skirtRadius);
+    EXPECT_FLOAT_EQ(RoomAggroRegistry::SkirtOverride(557, 18341), 0.0f);  // Pandemonius: none
+    EXPECT_FLOAT_EQ(RoomAggroRegistry::SkirtOverride(554, 12345), 0.0f);  // not a room boss
+}
+
+// The widened skirt must NOT change Pack B's room-trash membership: that reads
+// pullOutRadius (14yd), never the skirt. Pack B at 17.3yd is still KEPT even though
+// it now sits well inside the 40yd skirt.
+TEST(RoomAggroRegistryTest, MechanarSepethreaSkirtDoesNotReclassifyPackB)
+{
+    RoomAggroBoss const* sep = RoomAggroRegistry::Find(554, 19221);
+    ASSERT_NE(sep, nullptr);
+    ASSERT_GT(sep->skirtRadius, 17.3f);   // Pack B is inside the skirt
+    EXPECT_TRUE(RoomAggroRegistry::IsRoomTrash(*sep, 19510, 17.3f, sep->pullOutRadius));
+}
+
+// The pullOutRadius is what KEEPS Pack B as room trash. Pack B's nearest member
+// sits ~17.3yd from Sepethrea: inside her computed ~28yd exclusion sphere (would be
+// dropped as "comes with the boss") but OUTSIDE the 14yd pull-out radius the value
+// passes as bossSafeRadius when the row carries one — so it stays clearable and the
+// advanced pull drags it out. This mirrors what DungeonClearRoomTrashValue does with
+// room->pullOutRadius; IsRoomTrash itself just takes the effective radius.
+TEST(RoomAggroRegistryTest, MechanarSepethreaPullOutKeepsFrontPack)
+{
+    RoomAggroBoss const* sep = RoomAggroRegistry::Find(554, 19221);
+    ASSERT_NE(sep, nullptr);
+    // With the shrunk pull-out radius: Pack B (17.3yd) is KEPT.
+    EXPECT_TRUE(RoomAggroRegistry::IsRoomTrash(*sep, 19510, 17.3f, sep->pullOutRadius));
+    // With the real ~28yd exclusion sphere it would be dropped (the old behaviour
+    // the shrink exists to override).
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*sep, 19510, 17.3f, 28.0f));
+    // Something genuinely glued to her (inside 14yd) still comes with the boss.
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*sep, 19510, 10.0f, sep->pullOutRadius));
+    // Pack A far out (67yd) is still inside the 70yd room radius.
+    EXPECT_TRUE(RoomAggroRegistry::IsRoomTrash(*sep, 19168, 67.0f, sep->pullOutRadius));
+}
+
 // --- IsMemberEntry --------------------------------------------------------
 
 TEST(RoomAggroRegistryTest, EmptyWhitelistMatchesAnyEntry)
@@ -194,4 +268,70 @@ TEST(RoomAggroSkirtTest, NonPositiveRadiusNeverSkirts)
         -30.0f, 0.0f, 30.0f, 0.0f, 0.0f, 0.0f, 0.0f));
     EXPECT_FALSE(DcEngageGeometry::NeedsRoomAggroSkirt(
         -30.0f, 0.0f, 30.0f, 0.0f, 0.0f, 0.0f, -5.0f));
+}
+
+// --- FirstViolatedSphere (the en-route avoidance chooser) -----------------
+//
+// Same chord test, now over a SET of bystander packs. The contract is
+// "nearest violated sphere to the bot", because the tank rounds obstacles one
+// at a time and the proven single-sphere orbit does the actual walking.
+
+namespace
+{
+    using Sphere = DcEngageGeometry::AvoidSphere;
+
+    Sphere At(float x, float y, float r)
+    {
+        Sphere s;
+        s.x = x;
+        s.y = y;
+        s.r = r;
+        return s;
+    }
+}
+
+TEST(DcEnRouteAvoidTest, NoSpheresMeansNoDetour)
+{
+    EXPECT_EQ(DcEngageGeometry::FirstViolatedSphere(0.f, 0.f, 50.f, 0.f, {}), -1);
+}
+
+TEST(DcEnRouteAvoidTest, ClearCorridorMeansNoDetour)
+{
+    // Two packs well off the line: the walk passes nothing.
+    std::vector<Sphere> const s{At(25.f, 40.f, 10.f), At(25.f, -40.f, 10.f)};
+    EXPECT_EQ(DcEngageGeometry::FirstViolatedSphere(0.f, 0.f, 50.f, 0.f, s), -1);
+}
+
+TEST(DcEnRouteAvoidTest, PicksTheViolatorNearestTheBot)
+{
+    // Three packs sitting ON the line at 10, 25 and 40 yards out. The tank must
+    // round the FIRST one it would reach — rounding the far one first would walk
+    // it straight through the near one.
+    std::vector<Sphere> const s{At(40.f, 0.f, 8.f), At(10.f, 0.f, 8.f), At(25.f, 0.f, 8.f)};
+    EXPECT_EQ(DcEngageGeometry::FirstViolatedSphere(0.f, 0.f, 50.f, 0.f, s), 1);
+}
+
+TEST(DcEnRouteAvoidTest, IgnoresClearSpheresWhenPickingTheNearest)
+{
+    // The nearest pack (index 0) is off the line; the violator further out is the
+    // one to round. "Nearest" is nearest VIOLATOR, not nearest pack.
+    std::vector<Sphere> const s{At(5.f, 30.f, 8.f), At(30.f, 0.f, 8.f)};
+    EXPECT_EQ(DcEngageGeometry::FirstViolatedSphere(0.f, 0.f, 50.f, 0.f, s), 1);
+}
+
+TEST(DcEnRouteAvoidTest, DegenerateRadiiAreSkipped)
+{
+    // A zero/negative radius is "no sphere" (a mob whose aggro range resolved to
+    // nothing), not "a sphere at the origin the tank must orbit".
+    std::vector<Sphere> const s{At(25.f, 0.f, 0.f), At(25.f, 0.f, -5.f)};
+    EXPECT_EQ(DcEngageGeometry::FirstViolatedSphere(0.f, 0.f, 50.f, 0.f, s), -1);
+}
+
+TEST(DcEnRouteAvoidTest, PackTheTankIsStandingInIsStillRounded)
+{
+    // Recovery case, inherited from NeedsRoomAggroSkirt: the tank has drifted
+    // inside a bystander's aggro sphere. It must be told to leave, not to read
+    // "already inside, nothing to avoid" and carry on through.
+    std::vector<Sphere> const s{At(3.f, 0.f, 10.f)};
+    EXPECT_EQ(DcEngageGeometry::FirstViolatedSphere(0.f, 0.f, 50.f, 0.f, s), 0);
 }

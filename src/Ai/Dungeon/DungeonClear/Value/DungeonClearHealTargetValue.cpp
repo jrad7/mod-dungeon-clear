@@ -5,10 +5,13 @@
 
 #include "DungeonClearHealTargetValue.h"
 
+#include "Creature.h"
 #include "Group.h"
 #include "Playerbots.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 ObjectGuid DungeonClearHealTargetValue::Calculate()
 {
@@ -22,7 +25,7 @@ ObjectGuid DungeonClearHealTargetValue::Calculate()
 
     // The elected leader tank (non-null only on an active, unpaused run) is the
     // one we bias toward — it is the member being dragged out of sight.
-    Player* tank = context->GetValue<Player*>("dungeon clear party tank")->Get();
+    Player* tank = context->GetValue<Player*>(DcKey::PartyTank)->Get();
 
     float const hpFloor = DcSettings::GetFloat(bot, "HealRepositionHpFloor");
     float const tankBias = DcSettings::GetFloat(bot, "HealRepositionTankBias");
@@ -44,6 +47,21 @@ ObjectGuid DungeonClearHealTargetValue::Calculate()
 
         candidates.push_back({ member->GetHealthPct(), tank && member == tank });
         guids.push_back(member->GetGUID());
+    }
+
+    // Fold in the DC escortee (Thrall / the Disciple / ...) so the healer also
+    // repositions to keep IT in range and LOS — the reposition counterpart to the
+    // `party member to heal` decorator that puts the escortee in the heal rotation.
+    // Same LOS-blind maxDist gate as the members above (keeping an out-of-sight
+    // escortee in candidacy is the whole point); never tank-biased.
+    if (Creature* escortee = DcLeaderSignal::GetLeaderEscortee(bot))
+    {
+        if (escortee->IsAlive() && !escortee->IsCharmed() &&
+            bot->GetDistance2d(escortee) <= maxDist)
+        {
+            candidates.push_back({ escortee->GetHealthPct(), false });
+            guids.push_back(escortee->GetGUID());
+        }
     }
 
     std::size_t const idx =

@@ -7,6 +7,7 @@
 
 #include "DetourAlloc.h"
 #include "DetourNavMesh.h"
+#include "DetourNavMeshQuery.h"
 #include "DetourStatus.h"
 #include "MapDefines.h"
 #include "Ai/Dungeon/DungeonClear/Util/LongRangePathfinder.h"
@@ -149,5 +150,39 @@ namespace DcNavHarness
             out.maxStepZ = std::max(out.maxStepZ, std::fabs(b.z - a.z));
         }
         return out;
+    }
+
+    bool NearestPoint(dtNavMesh const* mesh,
+                      float x, float y, float z,
+                      float hExtent, float vExtent, G3D::Vector3& out)
+    {
+        if (!mesh)
+            return false;
+
+        dtNavMeshQuery* query = dtAllocNavMeshQuery();
+        if (!query)
+            return false;
+
+        bool found = false;
+        if (dtStatusSucceed(query->init(mesh, 4096)))
+        {
+            dtQueryFilter filter;
+            filter.setIncludeFlags(0xffff);  // any navigable poly (ground/water/magma)
+            filter.setExcludeFlags(0);
+
+            // Detour coordinate order is {y, z, x} (see BuildCoreFromMesh).
+            float const pt[3]  = { y, z, x };
+            float const ext[3] = { hExtent, vExtent, hExtent };
+            dtPolyRef ref = 0;
+            float nearest[3] = { 0, 0, 0 };
+            if (dtStatusSucceed(query->findNearestPoly(pt, ext, &filter, &ref, nearest)) && ref)
+            {
+                out = G3D::Vector3(nearest[2], nearest[0], nearest[1]);  // back to WoW {x,y,z}
+                found = true;
+            }
+        }
+
+        dtFreeNavMeshQuery(query);
+        return found;
     }
 }

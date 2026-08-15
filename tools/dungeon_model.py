@@ -13,6 +13,9 @@ loops). That dead band is what made the Jammal'an room clear deadlock.
 Pure game data (acore_world: `creature` (+ `creature_template`), optionally
 `gameobject`, and `instance_encounters` for boss detection). Read-only.
 
+OFFLINE DEV TOOL — not part of the running module: not compiled in, not invoked
+by any hook/tick/command, run by hand. See tools/README.md.
+
 Examples:
   # Whole-dungeon overview: list every boss and its surrounding pack.
   python3 tools/dungeon_model.py --map 109 --list-bosses
@@ -79,14 +82,30 @@ def mysql(args, sql):
     return rows
 
 
+def spawn_entry_column(args):
+    """`creature.id1` on older schemas, `creature.id` after the upstream rename."""
+    found = {r[0] for r in mysql(args,
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'creature' "
+        "AND COLUMN_NAME IN ('id', 'id1')") if r}
+    for candidate in ("id1", "id"):
+        if candidate in found:
+            return candidate
+    sys.exit("creature table has neither an `id` nor an `id1` column — "
+             "is " + args.db + " really a world DB?")
+
+
 def fetch_creatures(args, mapid):
+    entry = spawn_entry_column(args)
     sql = (
-        "SELECT c.guid, c.id1, ct.name, ct.rank, ct.faction, ct.unit_flags, "
+        f"SELECT c.guid, c.{entry}, ct.name, ct.rank, ct.faction, ct.unit_flags, "
         "c.position_x, c.position_y, c.position_z, "
-        "CASE WHEN ie.creditEntry IS NULL THEN 0 ELSE 1 END AS is_boss "
-        "FROM creature c JOIN creature_template ct ON ct.entry = c.id1 "
-        "LEFT JOIN instance_encounters ie "
-        "  ON ie.creditEntry = c.id1 AND ie.creditType = 0 "
+        # EXISTS, not a LEFT JOIN: a boss that is an encounter on both normal and
+        # heroic has two instance_encounters rows, and a join would emit that
+        # spawn twice -- double-counting it in the packs and ring reports.
+        "EXISTS (SELECT 1 FROM instance_encounters ie "
+        f"        WHERE ie.creditEntry = c.{entry} AND ie.creditType = 0) AS is_boss "
+        f"FROM creature c JOIN creature_template ct ON ct.entry = c.{entry} "
         f"WHERE c.map = {mapid}")
     rows = []
     for f in mysql(args, sql):

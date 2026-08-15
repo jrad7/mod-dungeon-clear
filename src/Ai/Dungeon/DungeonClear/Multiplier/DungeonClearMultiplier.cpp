@@ -4,6 +4,7 @@
  */
 
 #include "DungeonClearMultiplier.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
 #include "Action.h"
 #include "FollowActions.h"
@@ -11,7 +12,9 @@
 #include "Playerbots.h"
 #include "Position.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcSmartRest.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 float DungeonClearMultiplier::GetValue(Action* action)
 {
@@ -31,8 +34,17 @@ float DungeonClearMultiplier::GetValue(Action* action)
     // target BELOW the stock stop is honoured too. 0 = inherit, no cap.
     if (name == "food" || name == "drink")
     {
-        if (AI_VALUE(Player*, "dungeon clear party tank"))
+        if (Player* tank = AI_VALUE(Player*, DcKey::PartyTank))
         {
+            // Smart Rest hysteresis: between rests eating/drinking is FULLY
+            // suppressed (the stock medium-health/high-mana triggers included)
+            // so the party keeps pushing; during a latched rest it runs
+            // uncapped so everyone tops to 100. Humans have no multiplier and
+            // can always eat/drink; while paused PartyTank is null, so stock
+            // rest resumes for the duration of the pause.
+            if (DcSettings::GetBool(bot, "SmartRest"))
+                return DcSmartRest::IsLatched(tank) ? 1.0f : 0.0f;
+
             bool const isDrink = (name == "drink");
             uint32 const target =
                 DcSettings::GetUInt(bot, isDrink ? "RestManaPct" : "RestHealthPct");
@@ -58,7 +70,7 @@ float DungeonClearMultiplier::GetValue(Action* action)
     // stands; drop the shuffle for every member of an active run (same
     // cross-bot gate as the rest cap above).
     if (name == "move out of collision" &&
-        AI_VALUE(Player*, "dungeon clear party tank"))
+        AI_VALUE(Player*, DcKey::PartyTank))
         return 0.0f;
 
     // Wander-style autonomous navigation (grind / rpg / travel). This is what
@@ -100,8 +112,31 @@ float DungeonClearMultiplier::GetValue(Action* action)
             return 0.0f;
     }
 
-    bool const enabled = AI_VALUE(bool, "dungeon clear enabled");
-    bool const paused = AI_VALUE(bool, "dungeon clear paused");
+    // Stock follow-master (FollowAction, relevance ~1) points a bot at its MASTER —
+    // the human party leader — NOT the dungeon-clear tank. While a DC run is active
+    // DC owns 100% of positioning: follow-tank (rel 25) trails the tank out of
+    // combat, and the assist/regroup rungs drive the party into the tank's fight in
+    // combat. The failure this closes: when BOTH legitimately stand down for a tick
+    // — a follower flagged into combat (follow-tank bails on IsInCombat) during the
+    // brief threat-lead before the assist releases, with the pulled pack dragged out
+    // of its line of sight so stock combat has no visible target — the ONLY surviving
+    // movement action is stock follow-master, and it walks the follower to the HUMAN
+    // instead of the tank (the reported "dps run to me, not the tank" bug). Worse,
+    // FollowAction installs a PERSISTENT MoveFollow generator, so once it grabs a
+    // follower it keeps dragging it to the master even as the assist flickers back
+    // on. Suppress it for EVERY member of an active run (cross-bot PartyTank gate —
+    // followers never set `enabled`, and this sits above the enabled/paused gates
+    // like the camp-hold and rest-cap blocks; PartyTank resolves the leader only
+    // while the clear runs unpaused, and to the tank itself for the leader — which
+    // subsumes the tank-rubberband guard that used to live in the active branch).
+    // DC's own follow-tank redirect is a DcMovementAction, not a FollowAction, so
+    // this never touches it. When paused/off PartyTank is null and stock follow
+    // resumes (a paused run hands positioning back to the player).
+    if (dynamic_cast<FollowAction*>(action) && AI_VALUE(Player*, DcKey::PartyTank))
+        return 0.0f;
+
+    bool const enabled = DcRun::Of(context).enabled;
+    bool const paused = DcRun::Of(context).paused;
 
     // DC off: fully stock behavior, nothing suppressed.
     if (!enabled)
@@ -117,24 +152,53 @@ float DungeonClearMultiplier::GetValue(Action* action)
         return (isWander || isProactiveEngage) ? 0.0f : 1.0f;
 
     // --- Active (enabled && !paused) ------------------------------------------
-    // The tank leads the clear — it must never follow its master. When Advance
-    // yields to wait for the party to catch up (party spread > DungeonClear.PartyMaxSpread)
-    // it StopMoving()s and parks; without this, the stock FollowAction (relevance
-    // 1.0) then wins the idle tick and walks the tank BACK toward the stationary
-    // player, who is now in range again, so next tick Advance runs it forward to
-    // the spread limit and it yields again — a rubberband between the spread limit
-    // and the player. Suppressing follow for the tank lets it simply hold at the
-    // spread limit until the player catches up. Followers are unaffected: their
-    // redirect (DungeonClearFollowTankAction) is a separate MovementAction, and
-    // only non-tanks run it.
-    if (PlayerbotAI::IsTank(bot) && dynamic_cast<FollowAction*>(action))
-        return 0.0f;
-
+    // (Stock follow-master is already suppressed above for every active-run member,
+    // tank included — the tank must never rubberband back toward its master when
+    // Advance parks at the party-spread limit, and followers must never drift to the
+    // human mid-fight. That guard is the cross-bot PartyTank block above the enabled
+    // gate, because followers never set `enabled` and would return early here.)
+    //
     // Suppress wander AND the stock proactive-engagement pickers while DC is
     // active — DC owns engagement via its own engage-trash/engage-boss actions.
     // Anything else (loot, food, drink, reactive combat, our own dungeon-clear
     // actions, and follow for non-tanks) is untouched.
     if (isWander || isProactiveEngage)
         return 0.0f;
+    return 1.0f;
+}
+
+float DungeonClearCombatMultiplier::GetValue(Action* action)
+{
+    if (!action || !botAI || !bot)
+        return 1.0f;
+
+    // Touch EXACTLY ONE combat action. Fast-path everything else so a fight's full
+    // action list pays only a single string compare per tick — the combat engine
+    // otherwise stays fully stock.
+    if (action->getName() != "drop target")
+        return 1.0f;
+
+    // Drop-target ping-pong guard. Engine transitions are action-driven: the stock
+    // "drop target" (CombatStrategy, relevance 99) fires whenever the current target
+    // is "invalid", and InvalidTargetValue treats OUT-OF-LINE-OF-SIGHT as invalid
+    // (AttackersValue::IsValidTarget -> IsWithinLOSInMap). It then leaves the combat
+    // engine. So when the flip-early party-assist seeds the tank's mob and flips a
+    // follower into the combat engine to close on it (DungeonClearAssistCampAction),
+    // drop target (99) out-ranks reach spell/melee (20) every tick and bounces the
+    // bot straight back to the non-combat engine before it can move — the 1-tick
+    // engine ping-pong that froze the party mid-fight (observed live: 1679 flip
+    // attempts, 0 engages). Suppress drop target ONLY for that transient case: an
+    // active tank-fight assist, a non-healer, and a current target that is alive,
+    // same-map and attackable but merely out of LOS (still being closed on). A dead /
+    // despawned / truly-invalid target is NOT out-of-LOS-only, so it still drops
+    // normally and the bot moves on or leaves combat cleanly.
+    if (PlayerbotAI::IsHeal(bot) || !DcLeaderSignal::IsLeaderFightAssistWanted(bot))
+        return 1.0f;
+
+    Unit* tgt = AI_VALUE(Unit*, DcKey::Stock::CurrentTarget);
+    if (tgt && tgt->IsAlive() && tgt->GetMapId() == bot->GetMapId() &&
+        bot->IsValidAttackTarget(tgt) && !bot->IsWithinLOSInMap(tgt))
+        return 0.0f;
+
     return 1.0f;
 }

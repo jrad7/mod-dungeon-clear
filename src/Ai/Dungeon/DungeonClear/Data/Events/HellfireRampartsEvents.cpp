@@ -4,6 +4,7 @@
  */
 
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonRosterBuilders.h"
 
 #include "InstanceScript.h"
 #include "Player.h"
@@ -40,10 +41,15 @@
 // Vazruden's encounter bit is set (killed), ending the loop. Folded under
 // Vazruden in the panel.
 
+namespace
+{
+    bool HfrApproach(Player* bot, AiObjectContext* context);
+}
+
 void RegisterHellfireRampartsEvents(std::vector<DungeonEvent>& out)
 {
     out.push_back(EventBuilder(543, 1, "Approach Vazruden")
-                      .Conditional(16)
+                      .Conditional(&HfrApproach)
                       .Repeatable()
                       .PanelBeforeBoss(/*Vazruden*/ 17537)
                       // Dead centre between the two Hellfire Sentries
@@ -98,7 +104,38 @@ namespace
     }
 }
 
-void RegisterHellfireRampartsConditions(EventConditionMap& out)
+
+// --- roster patch (relocated from BossRosterRegistry) --------------------
+void RegisterHellfireRampartsRoster(std::vector<BossRosterPatch>& t)
 {
-    out[16] = &HfrApproach;
+    using namespace DcRoster;
+
+    // --- Hellfire Ramparts (map 543) -----------------------------
+    // The derived list ends at Omor (17308): BossSpawnIndex walks DB
+    // spawns, but the final encounter's credit creature, Vazruden
+    // (17537), is a TempSummon with no spawn, so it never appears and
+    // the run would stop one boss short. The Herald (17307) — the only
+    // creature actually spawned — sits REACT_PASSIVE on the UPPER ledge
+    // (z~102), which is NOT where the fight happens, so it is the wrong
+    // anchor.
+    //
+    // Add the final boss explicitly at the LOWER platform, dead between
+    // the two Hellfire Sentries his Reset summons (-1372.56, 1724.31 and
+    // -1383.39, 1711.82, z~82.8) — killing both is the only trigger, and
+    // it flies Vazruden + Nazan down. Boss-nav drives the tank here; the
+    // "Approach Vazruden" event (eventId 1, condition 16) holds him on
+    // the trigger and engages the summoned boss (invisible to the
+    // live-boss spawn-store scan). Vazruden carries DungeonEncounter.dbc
+    // encounterIndex 2 (bit 2), set directly because there is no derived
+    // base entry for inheritCompletionFrom to borrow from.
+    {
+        BossRosterPatch p;
+        p.mapId = 543;
+        DungeonBossInfo vazruden =
+            MakeBoss(/*Vazruden*/ 17537, 543, "Vazruden the Herald",
+                     -1378.0f, 1718.0f, 82.9f, /*completionFrom*/ 0);
+        vazruden.encounterIndex = 2;  // DBC bit 2 (final encounter)
+        p.add = { vazruden };
+        t.push_back(std::move(p));
+    }
 }

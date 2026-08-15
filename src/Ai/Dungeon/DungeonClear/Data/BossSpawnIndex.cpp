@@ -97,6 +97,15 @@ void BossSpawnIndex::Build()
             if (row.mapId != data.mapid)
                 continue;
 
+            // A spawn belongs to a difficulty bucket only when its spawnMask
+            // bit says it exists there. Most 5-man spawns are mask 3 (both);
+            // a heroic-only placement (Shattered Halls' Porung, mask 2) must
+            // not leak coords into the normal bucket, nor a normal-only spawn
+            // into heroic. Mask 0 is treated as "no filter" (defensive — some
+            // custom rows leave it unset).
+            if (data.spawnMask && !(data.spawnMask & (1u << row.difficulty)))
+                continue;
+
             DungeonBossInfo info;
             info.entry = entry;
             info.encounterIndex = row.encounterIndex;

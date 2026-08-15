@@ -4,6 +4,8 @@
  */
 
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonRosterBuilders.h"
+#include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
 
 #include "GameObject.h"
 #include "Log.h"
@@ -11,6 +13,9 @@
 #include "Playerbots.h"
 #include "SharedDefines.h"
 #include "Timer.h"
+
+#include <atomic>
+#include <unordered_map>
 
 // --- Dire Maul East (map 429) — Ironbark / Conservatory Door -------------
 // Alzzin the Wildshaper's grove is sealed behind the Conservatory Door (GO
@@ -41,6 +46,14 @@
 // find an empty menu and stall. SkipIfTargetMissing lets the gossip step skip
 // once he has walked off / despawned; Optional degrades a non-firing script to
 // the normal door-blocked stall (the door still opens, driven by his own AI).
+
+namespace
+{
+    bool GordokCourtyardDoor(Player* bot, AiObjectContext* context);
+    bool GordokInnerDoor(Player* bot, AiObjectContext* context);
+    bool CrescentDoorLower(Player* bot, AiObjectContext* context);
+    bool CrescentDoorUpper(Player* bot, AiObjectContext* context);
+}
 
 void RegisterDireMaulEvents(std::vector<DungeonEvent>& out)
 {
@@ -100,7 +113,7 @@ void RegisterDireMaulEvents(std::vector<DungeonEvent>& out)
     // surface in the Dire Maul East/West panels (the boss list is wing-filtered;
     // an event whose anchor boss isn't in it is hidden). See DungeonClearChatActions.
     out.push_back(EventBuilder(429, 2, "Open the Gordok Courtyard Door")
-                      .Conditional(/*conditionId*/ 12)
+                      .Conditional(&GordokCourtyardDoor)
                       .UseGO(/*Gordok Courtyard Door*/ 177219, /*searchRadius*/ 25.0f)
                       .WaitForGOState(177219, /*GO_STATE_ACTIVE*/ 0,
                                       /*timeout*/ 30000, /*searchRadius*/ 25.0f)
@@ -109,7 +122,7 @@ void RegisterDireMaulEvents(std::vector<DungeonEvent>& out)
                       .Build());
 
     out.push_back(EventBuilder(429, 3, "Open the Gordok Inner Door")
-                      .Conditional(/*conditionId*/ 13)
+                      .Conditional(&GordokInnerDoor)
                       .UseGO(/*Gordok Inner Door*/ 177217, /*searchRadius*/ 25.0f)
                       .WaitForGOState(177217, /*GO_STATE_ACTIVE*/ 0,
                                       /*timeout*/ 30000, /*searchRadius*/ 25.0f)
@@ -259,7 +272,7 @@ void RegisterDireMaulEvents(std::vector<DungeonEvent>& out)
     // route short of it). Same shape as the Gordok doors. (The third lock-1562
     // door, 179549 at the entrance, is off the West boss path and is ignored.)
     out.push_back(EventBuilder(429, 9, "Open the Crescent Key Door (lower)")
-                      .Conditional(/*conditionId*/ 14)
+                      .Conditional(&CrescentDoorLower)
                       .UseGO(/*after Tendris*/ 177221, /*searchRadius*/ 25.0f)
                       .WaitForGOState(177221, /*GO_STATE_ACTIVE*/ 0,
                                       /*timeout*/ 30000, /*searchRadius*/ 25.0f)
@@ -268,7 +281,7 @@ void RegisterDireMaulEvents(std::vector<DungeonEvent>& out)
                       .Build());
 
     out.push_back(EventBuilder(429, 10, "Open the Crescent Key Door (upper)")
-                      .Conditional(/*conditionId*/ 15)
+                      .Conditional(&CrescentDoorUpper)
                       .UseGO(/*before Immol'thar*/ 179550, /*searchRadius*/ 25.0f)
                       .WaitForGOState(179550, /*GO_STATE_ACTIVE*/ 0,
                                       /*timeout*/ 30000, /*searchRadius*/ 25.0f)
@@ -298,8 +311,10 @@ namespace
         GameObject* door = bot->FindNearestGameObject(doorEntry, DM_DOOR_SCAN);
 
         // Throttled diagnostic (one line / 5s) so a live run shows whether the
-        // door is in reach and its state. Lands in DungeonClear.log.
-        static uint32 lastLog = 0;
+        // door is in reach and its state. Lands in DungeonClear.log. atomic because
+        // bot AI ticks run on the MapUpdate.Threads pool — the throttle stamp is
+        // read/written from multiple map threads (the check-then-set race is benign).
+        static std::atomic<uint32> lastLog{0};
         uint32 const now = getMSTime();
         if (getMSTimeDiff(lastLog, now) >= 5000)
         {
@@ -337,10 +352,235 @@ namespace
     }
 }
 
-void RegisterDireMaulConditions(EventConditionMap& out)
+
+// --- roster patch (relocated from BossRosterRegistry) --------------------
+void RegisterDireMaulRoster(std::vector<BossRosterPatch>& t)
 {
-    out[12] = &GordokCourtyardDoor;
-    out[13] = &GordokInnerDoor;
-    out[14] = &CrescentDoorLower;
-    out[15] = &CrescentDoorUpper;
+    using namespace DcRoster;
+
+    // --- Dire Maul (map 429) — East + West (ONE patch per map) ----
+    // FindPatch returns the FIRST patch matching a map, so all of Dire
+    // Maul's wings share a SINGLE map-429 BossRosterPatch. Wing-filtering
+    // (DungeonWingRegistry, applied after this) scopes each run to its
+    // wing, so the East objective, the West reorder and the West pylon
+    // objectives coexist here harmlessly — an East run never sees the
+    // West adds and vice versa. orderOverride integers may therefore
+    // repeat across wings (ordering is computed per wing).
+    //
+    // EAST — Conservatory Door objective. Alzzin's grove is sealed behind
+    // the Conservatory Door (GO 176907), opened only by Ironbark the
+    // Redeemed (14241) after a gossip. A travel OBJECTIVE at Ironbark's
+    // spawn (wired to event 429/1) lets boss-nav deliver the tank to him;
+    // the anchored event gossips him and waits for the door he walks off
+    // to open. ANCHORED because the opener stands ~190yd OFF the corridor
+    // (contrast the North Gordok / West Crescent doors, which sit ON the
+    // corridor and so are CONDITIONAL — see DireMaulEvents.cpp). East
+    // bosses reordered onto 10/20/30/50 with a gap (40) for the objective.
+    //
+    // WEST — order fix + Immol'thar pylons. The DBC encounter order does
+    // not match the kill order, and Prince Tortheldrin (11486) must be
+    // last: he is friendly/non-attackable until Immol'thar (11496) dies,
+    // yet his chamber (y625) sits BEFORE Immol'thar (y812) on the walk.
+    // Reorder so Immol'thar precedes the Prince. Immol'thar is held
+    // NON_ATTACKABLE by a force field (GO 179503) until all five Crystal
+    // Generators (pylons) are destroyed (the instance ORs a bitmask and
+    // clears the flag at 0x1F). The five generators (BUTTON GOs) are
+    // scattered wing-wide, far beyond HopTo range, so each is a travel
+    // OBJECTIVE wired to a tiny anchored UseGO event (DireMaulEvents
+    // 429/4..429/8) — the Sunken-Temple / Uldaman-altar pattern. Ordered
+    // south-trio-before-Tendris / north-pair-before-Immol'thar to track
+    // the route (pure orderOverride tuning if a backtrack looks bad live).
+    // Engage of Immol'thar naturally waits on his NON_ATTACKABLE flag, so
+    // no explicit "all pylons down" gate is needed. The objective
+    // encounterIndex values are synthetic highs (40 East; 41-45 West
+    // pylons) distinct from any real DBC kill-bit; objective completion
+    // keys on the anchor latch (eventId), never on encounterIndex.
+    //
+    // All synthetic objective entries are added to their wing's list in
+    // DungeonWingRegistry so wing-filtering keeps them.
+    {
+        BossRosterPatch p;
+        p.mapId = 429;
+        p.reorder = {
+            // East
+            { 11490, 10 },  // Zevrim Thornhoof
+            { 13280, 20 },  // Hydrospawn
+            { 14327, 30 },  // Lethtendris
+            { 11492, 50 },  // Alzzin the Wildshaper (last)
+            // West
+            { 11489, 10 },  // Tendris Warpwood
+            { 11488, 20 },  // Illyanna Ravenoak
+            { 11487, 30 },  // Magister Kalendris
+            { 11496, 45 },  // Immol'thar (after all five pylons)
+            { 11486, 50 },  // Prince Tortheldrin (last)
+        };
+        p.add = {
+            // East — Ironbark / Conservatory Door.
+            MakeObjective(OBJ(1), /*encounterIndex*/ 40, 429,
+                          "Ironbark the Redeemed (Conservatory Door)",
+                          -56.59f, -269.12f, -57.87f,
+                          /*arriveRadius*/ 12.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 1, /*orderOverride*/ 40),
+            // West — SWEEP the Warpwood entrance room: a GRID of small
+            // clear-waypoints that together tile the whole treant field
+            // (x -97..+135 by y 185..360) in three latitude bands. These
+            // anchors are on OPEN FLOOR among the treants (not on the
+            // off-mesh crystal dais), so the tank reaches them closely (no
+            // parks-short) and "arrives" among the treants (so each
+            // ClearRadius engages instead of 0ms no-op). arriveRadius 30 <
+            // each stop's ClearRadius (small, so the tank fights the
+            // closing pack in place rather than chasing far).
+            //
+            // ALL three bands order BEFORE generator 1 (override 2/3/4 <
+            // Gen1's 5), so the tank sweeps the ENTIRE room front-to-back
+            // (entrance y~195 -> mid y~270 -> approach y~357) before the
+            // first generator at y278 — one contiguous northward pass, and
+            // crucially the northern approach is cleared while the y>=410
+            // Eldreth / Tendris are still asleep. Within a band, same-key
+            // siblings are visited in add-order (stable_sort); the calls
+            // below run a serpentine (entrance W->C->E, mid E->W, approach
+            // W->E) so each band starts near where the last one ended. See
+            // DireMaulEvents 429/11-17.
+            // Band 1 — entrance lip (west -> centre -> east).
+            MakeObjective(OBJ(8), /*encounterIndex*/ 47, 429,
+                          "Clear the Warpwood entrance (west)",
+                          -97.0f, 202.0f, -4.0f,
+                          /*arriveRadius*/ 30.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 12, /*orderOverride*/ 2),
+            MakeObjective(OBJ(9), /*encounterIndex*/ 48, 429,
+                          "Clear the Warpwood entrance (centre)",
+                          -15.0f, 192.0f, -3.5f,
+                          /*arriveRadius*/ 30.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 11, /*orderOverride*/ 2),
+            MakeObjective(OBJ(10), /*encounterIndex*/ 49, 429,
+                          "Clear the Warpwood entrance (east)",
+                          128.0f, 200.0f, -4.0f,
+                          /*arriveRadius*/ 30.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 13, /*orderOverride*/ 2),
+            // Band 2 — mid hall (east -> west), before generator 1.
+            MakeObjective(OBJ(11), /*encounterIndex*/ 50, 429,
+                          "Clear the Warpwood hall (east)",
+                          60.0f, 285.0f, -8.0f,
+                          /*arriveRadius*/ 30.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 15, /*orderOverride*/ 3),
+            MakeObjective(OBJ(12), /*encounterIndex*/ 51, 429,
+                          "Clear the Warpwood hall (west)",
+                          -44.0f, 280.0f, -7.5f,
+                          /*arriveRadius*/ 30.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 14, /*orderOverride*/ 3),
+            // Band 3 — northern approach (west -> east), before generator 1.
+            MakeObjective(OBJ(13), /*encounterIndex*/ 52, 429,
+                          "Clear the Warpwood approach (west)",
+                          -93.0f, 357.0f, -4.0f,
+                          /*arriveRadius*/ 30.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 16, /*orderOverride*/ 4),
+            MakeObjective(OBJ(14), /*encounterIndex*/ 53, 429,
+                          "Clear the Warpwood approach (east)",
+                          126.0f, 357.0f, -4.0f,
+                          /*arriveRadius*/ 30.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 17, /*orderOverride*/ 4),
+            // West — Immol'thar pylons. Southern trio (before Tendris).
+            // The crystal objectives' arriveRadius (45) is moderate — big
+            // enough to clear the parks-short distance (so no travel-thrash
+            // deadlock) yet close enough that "arrived" means among the
+            // guards (so the ClearRadius engages, not a 0ms no-op).
+            MakeObjective(OBJ(2), /*encounterIndex*/ 41, 429,
+                          "Destroy Demon Crystal (Generator 1)",
+                          12.94f, 277.93f, -8.93f,
+                          /*arriveRadius*/ 45.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 4, /*orderOverride*/ 5),
+            MakeObjective(OBJ(3), /*encounterIndex*/ 42, 429,
+                          "Destroy Demon Crystal (Generator 2)",
+                          -92.35f, 442.67f, 28.55f,
+                          45.0f, 0, 0, /*eventId*/ 5, /*orderOverride*/ 6),
+            MakeObjective(OBJ(4), /*encounterIndex*/ 43, 429,
+                          "Destroy Demon Crystal (Generator 3)",
+                          121.22f, 429.09f, 28.45f,
+                          45.0f, 0, 0, /*eventId*/ 6, /*orderOverride*/ 7),
+            // West — northern pair (by Immol'thar's prison, after Kalendris).
+            MakeObjective(OBJ(5), /*encounterIndex*/ 44, 429,
+                          "Destroy Demon Crystal (Generator 4)",
+                          78.14f, 737.40f, -24.62f,
+                          45.0f, 0, 0, /*eventId*/ 7, /*orderOverride*/ 40),
+            // Detour waypoint between the two northern pylons. Immol'thar's
+            // force field (GO 179503) is a ~83yd-radius dome centred on him
+            // (-39,814) — the ring of 18 imprisoned Highborne Summoners sits
+            // right on it. The dome is a DOOR-type GO, excluded from the
+            // navmesh, so Detour would draw a straight crystal4->crystal5
+            // chord that passes ~78yd south of centre — INSIDE the dome,
+            // which players can't enter. This pure waypoint (no event/hook —
+            // latched done on arrival) at due-south dist ~116yd forces the
+            // route around the south arc: both legs stay >=109yd from
+            // centre, clear of the dome. Floor is open here (Residual
+            // Monstrosities spawn out to ~Y697). Ordered between the pylons.
+            MakeObjective(OBJ(7), /*encounterIndex*/ 46, 429,
+                          "Skirt Immol'thar's barrier",
+                          -38.0f, 697.0f, -24.62f,
+                          /*arriveRadius*/ 12.0f, 0, /*hook*/ 0,
+                          /*eventId*/ 0, /*orderOverride*/ 41),
+            MakeObjective(OBJ(6), /*encounterIndex*/ 45, 429,
+                          "Destroy Demon Crystal (Generator 5)",
+                          -155.43f, 734.17f, -24.62f,
+                          45.0f, 0, 0, /*eventId*/ 8, /*orderOverride*/ 42),
+        };
+        t.push_back(std::move(p));
+    }
+}
+
+// --- wing layout (relocated from DungeonWingRegistry) --------------------
+void RegisterDireMaulWings(std::unordered_map<uint32, DungeonWingLayout>& store)
+{
+    // --- Dire Maul (map 429) -------------------------------------
+    // Three wings, each entered through its own portal; no in-instance
+    // route connects them. Grouping verified against creature spawn
+    // coords (East sits at y < -100, West at x < 150 / y > 400, North
+    // at x > 300), which is also why nearest-boss wing detection is
+    // unambiguous. isolated == true: filter to the bot's wing.
+    store[429] = {true, {
+        {"Dire Maul (East)", {
+            11490,  // Zevrim Thornhoof
+            13280,  // Hydrospawn
+            14327,  // Lethtendris
+            11492,  // Alzzin the Wildshaper
+            // Ironbark / Conservatory Door travel objective (a synthetic
+            // entry, not a creature) — keep it in-wing so wing-filtering
+            // doesn't drop it. See BossRosterRegistry map-429 patch.
+            BossRosterRegistry::ObjectiveEntry(1),
+        }},
+        {"Dire Maul (West)", {
+            11489,  // Tendris Warpwood
+            11488,  // Illyanna Ravenoak
+            11487,  // Magister Kalendris
+            11496,  // Immol'thar
+            11486,  // Prince Tortheldrin
+            // Immol'thar's five Crystal Generator (pylon) travel
+            // objectives — synthetic entries, not creatures; keep them
+            // in-wing so wing-filtering doesn't drop them. See the
+            // map-429 West patch in BossRosterRegistry.
+            BossRosterRegistry::ObjectiveEntry(2),
+            BossRosterRegistry::ObjectiveEntry(3),
+            BossRosterRegistry::ObjectiveEntry(4),
+            BossRosterRegistry::ObjectiveEntry(5),
+            BossRosterRegistry::ObjectiveEntry(6),
+            BossRosterRegistry::ObjectiveEntry(7),  // barrier-skirt waypoint
+            // Warpwood entrance SWEEP grid (3 bands, 7 stops). See the
+            // map-429 West patch in BossRosterRegistry / DireMaulEvents.
+            BossRosterRegistry::ObjectiveEntry(8),   // entrance (W)
+            BossRosterRegistry::ObjectiveEntry(9),   // entrance (centre)
+            BossRosterRegistry::ObjectiveEntry(10),  // entrance (E)
+            BossRosterRegistry::ObjectiveEntry(11),  // mid hall (W)
+            BossRosterRegistry::ObjectiveEntry(12),  // mid hall (E)
+            BossRosterRegistry::ObjectiveEntry(13),  // approach (W)
+            BossRosterRegistry::ObjectiveEntry(14),  // approach (E)
+        }},
+        {"Dire Maul (North)", {
+            14326,  // Guard Mol'dar
+            14322,  // Stomper Kreeg
+            14321,  // Guard Fengus
+            14323,  // Guard Slip'kik
+            14325,  // Captain Kromcrush
+            14324,  // Cho'Rush the Observer
+            11501,  // King Gordok
+        }},
+    }};
 }

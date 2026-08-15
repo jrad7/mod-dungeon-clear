@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "Common.h"
+#include "Ai/Dungeon/DungeonClear/Data/DcDifficultyGate.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 
 // Per-dungeon corrections to the auto-derived boss list (BossSpawnIndex).
@@ -44,6 +45,12 @@ struct BossRosterPatch
     // travel objectives into the same scale via MakeObjective's orderOverride.
     // Entries not listed keep their DBC encounterIndex order.
     std::vector<std::pair<uint32, int32>> reorder;
+    // Difficulty gate. Most patches are Any (5-man rosters mostly match across
+    // normal/heroic); a heroic-only correction (an added heroic bonus boss /
+    // anchor, or a remove that only applies on heroic) goes in a SECOND patch
+    // for the same map with gate HeroicOnly — Apply applies every patch whose
+    // gate matches the run's difficulty, in registration order.
+    DcDifficultyGate gate{DcDifficultyGate::Any};
 };
 
 class BossRosterRegistry
@@ -57,10 +64,18 @@ public:
     // in the `dc bosses` panel (DungeonEvent::panelGatesBossEntry).
     static constexpr uint32 ObjectiveEntry(uint32 seq) { return 0x4F000000u | seq; }
 
-    // Returns the patched boss list for `mapId`. If no patch is registered the
-    // base list is returned unchanged. Patches are difficulty-agnostic (5-man
-    // rosters match across normal/heroic), so the lookup keys on mapId only.
-    static std::vector<DungeonBossInfo> Apply(uint32 mapId, std::vector<DungeonBossInfo> base);
+    // The full patch table. Exposed as a seam for the registry-integrity gtests
+    // (t/TestEventRegistry.cpp): the added objectives carry the eventId /
+    // onArriveHook / wing cross-references validated there. Not used by runtime
+    // callers, which go through Apply/HasPatch.
+    static std::vector<BossRosterPatch> const& AllPatches();
+
+    // Returns the patched boss list for `mapId` at `difficulty`. Every patch
+    // whose mapId matches AND whose gate matches the difficulty is applied, in
+    // registration order (a map typically has one Any patch, optionally plus a
+    // HeroicOnly one). If none match, the base list is returned unchanged.
+    static std::vector<DungeonBossInfo> Apply(uint32 mapId, Difficulty difficulty,
+                                              std::vector<DungeonBossInfo> base);
 
     // True if any patch exists for the map (cheap gate for callers).
     static bool HasPatch(uint32 mapId);

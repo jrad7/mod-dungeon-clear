@@ -9,6 +9,7 @@
 #include "Define.h"
 #include "ObjectGuid.h"
 #include "Position.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcProgressWatchdog.h"
 
 // All transient per-approach state for one boss-approach run, owned as a single
 // value (DungeonClearApproachStateValue, "dungeon clear approach state") so the
@@ -30,17 +31,53 @@
 // inline ->Set(0u) clusters.
 struct DcApproachState
 {
-    // --- per-approach stuck / recovery counters ---------------------------
-    uint32 posStuckTicks       = 0;  // no-displacement ticks (was "stuck ticks")
-    uint32 doorWalkInStuckTicks = 0; // door-blocked walk-in's own wedge counter
+    // --- per-approach stuck / recovery watchdogs (nav review F11) ---------
+    // Four instances of the shared DcProgressWatchdog replace the per-movement-
+    // mode stuck counters that had accreted one at a time. Two watch DISPLACEMENT
+    // (an escort spline grinding against geometry): the route glide and the
+    // door-blocked walk-in. Two watch CLOSING-DISTANCE to the boss (which also
+    // sees a fully STALLED bot — the non-moving blind spot displacement can't):
+    // the direct-pursuit give-up latch and the path-ends-short final approach.
+    // Separate instances because they run in different phases and reset
+    // independently. stuckCount / rebuildAttempts stay as the meta-layer.
+    DcProgressWatchdog routeGlideWatch;      // advance route-glide wedge (was posStuckTicks)
+    DcProgressWatchdog doorWalkInWatch;      // door walk-in wedge (was doorWalkInStuckTicks)
+    DcProgressWatchdog pursuitWatch;         // direct-pursuit give-up latch (was pursuitFailTicks)
+    DcProgressWatchdog finalApproachWatch;   // path-ends-short escalation (was doneNotEngagedTicks)
+    // Net-progress gate for the stuck-recovery LADDER (resnap -> rebuild -> nudge ->
+    // stall). Distinct from routeGlideWatch, which asks "did I move this tick"; this
+    // asks "have I got any NEARER my objective since the last recovery". They must be
+    // different questions: a bot shuttling back and forth displaces plenty every tick
+    // while getting nowhere, and keying the ladder's reset on displacement made the
+    // escalation unreachable by construction (tr-20260804-153254-2: 87 of 87 posStuck
+    // events logged resnapAttempts=1 rebuildAttempts=0 — the ladder never once left
+    // its first rung across a 27-minute run). See FillStuckObs.
+    DcProgressWatchdog recoveryProgressWatch;
+    // Bounds the engage-trash "far, long-route trash -> let Advance close the gap"
+    // hand-off. It is only sound while Advance is actually walking us toward the pack;
+    // for one beside or behind the route to the next boss the hand-off is permanent and
+    // a pack DC already voted to fight is silently abandoned (tr-20260804-153254-2).
+    // Tracks whether the gap to `longRouteDeferTarget` is closing — see
+    // DungeonClearEngageTrashAction::Execute.
+    DcProgressWatchdog longRouteDeferWatch;
+    ObjectGuid longRouteDeferTarget;         // pack the deferral above is measuring
+    // The deferral has been judged a failure for THIS target and must not be offered
+    // again while it stays the target. A latch, because the budget alone cannot carry
+    // the verdict: the one walk-in step taken on the tick the budget blew is itself an
+    // improvement in the gap, which re-arms the closing test and hands the pack
+    // straight back to Advance. Without this the action claims one tick in every
+    // DC_LONGROUTE_DEFER_LIMIT and the tank is dragged away in between — a stutter
+    // rather than an engagement. Cleared when the target changes or comes in range.
+    bool longRouteDeferBlown = false;
     uint32 stuckCount          = 0;  // MoveTo-returned-false backup (was "stuck count")
     uint32 rebuildAttempts     = 0;  // consecutive rebuilds w/o progress ("stride rebuild attempts")
-    uint32 pursuitFailTicks    = 0;  // direct-pursuit give-up latch ("pursuit fail ticks")
-    uint32 doneNotEngagedTicks = 0;  // path-ends-short escalation ("done-not-engaged ticks")
+    uint32 resnapAttempts      = 0;  // consecutive Resnap recoveries w/o progress (rung-1 give-up)
+    uint32 partyNotReadyTicks  = 0;  // consecutive between-pulls not-ready ticks (yield debounce)
 
     // --- approach bookkeeping ---------------------------------------------
     Position lastPos;                // previous-tick world pos; (0,0,0) = not yet sampled
     uint32 lastTickLogMs       = 0;  // advance-tick debug-log throttle (getMSTime)
+    uint32 lastObjectiveDiagMs = 0;  // at-objective "near but not arrived" diag throttle (getMSTime)
     uint32 lastTargetEntry     = 0;  // committed boss entry the approach is for
     uint32 lootYieldStartMs    = 0;  // loot-yield commit anchor (getMSTime)
 
@@ -58,6 +95,64 @@ struct DcApproachState
     // changes, and on every approach reset / boss change.
     int8 skirtOrbitDir         = 0;  // 0 = unlatched, +/-1 = committed orbit rotation
     ObjectGuid skirtOrbitTarget;     // trash GUID the current orbit latch is for
+
+    // En-route pack avoidance (DcEngageGeometry::EnRoutePackAvoidPoint) reuses
+    // the same orbit machinery, but around a BYSTANDER pack rather than a
+    // room-aggro boss — and which bystander is "the one in the way" changes as
+    // the tank rounds them one at a time. The latch is therefore keyed by the
+    // SPHERE being rounded, not by the destination: inheriting a "round left"
+    // committed for a pack we have already passed is the same two-point bounce
+    // the boss skirt latch exists to prevent. Reset when the chosen sphere
+    // changes, and by the approach reset below.
+    int8 avoidOrbitDir         = 0;  // 0 = unlatched, +/-1 = committed rotation
+    ObjectGuid avoidOrbitSphere;     // pack GUID the current avoid orbit is for
+
+    // --- chase leash (approach to a MOVING trash target) ------------------
+    // A trash target is latched by GUID and read live, so a walking mob turns
+    // every approach into a pursuit: the tank follows it across the room and
+    // wakes everything its route passes behind. The leash pins the approach to
+    // the ground the pull was PLANNED against — `chaseAnchor` is where the mob
+    // stood when we committed to walking at it, `chaseOrigin` where the tank
+    // stood then (the fixed origin the receding test is measured from; from the
+    // tank's live position the gap always shrinks as we walk and the leash could
+    // never engage). A target that recedes past the leash is waited out rather
+    // than chased — see DungeonClearMath::DecideChase.
+    //
+    // Keyed by `chaseTarget`, so a different pack simply re-anchors; there is no
+    // stale-latch window. Shared by BOTH walks that aim at a live trash unit (the
+    // pull's tag leg and the engage walk-in) so they can never disagree about how
+    // far the same mob has drifted.
+    ObjectGuid chaseTarget;          // target the anchor below belongs to
+    Position   chaseAnchor;          // where THAT MOB stood when we committed
+    Position   chaseOrigin;          // where the TANK stood then (gap origin)
+    uint32     chaseHoldSince  = 0;  // getMSTime() the current hold began; 0 = not holding
+
+    // Mid-glide hazard probe (Advance). While a continuous escort spline is in
+    // flight the hop ladder short-circuits (the ride outranks everything), so a
+    // PATROL can wander into the committed window after launch unobserved. The
+    // probe re-tests the remaining window against the bystander avoid-spheres at
+    // most every DC_GLIDE_HAZARD_PROBE_MS and halts the glide (escort-aware
+    // stop) when something violates it. The ignore latch is what stops a
+    // stop/launch ping-pong: the sphere that caused the last interrupt is
+    // skipped, so the tank interrupts only for something NEW.
+    uint32 glideHazardProbeMs  = 0;  // last probe timestamp (getMSTime)
+
+    // Flagged-in-combat driving gate. getMSTime the "flagged in combat but nobody
+    // is actually fighting" state began; 0 = not streaking. Shared by every driver
+    // trigger (they all ask the same question about the same bot), and cleared the
+    // instant a real engagement reappears. See DungeonClearMath::MayDriveWhileFlagged
+    // and DC_FLAGGED_NO_ENGAGE_GRACE_MS.
+    uint32 flaggedNoEngageSinceMs = 0;
+
+    // The rest gates' twin of the latch above (DcCombatFlag::IsPhantomFlag). Same
+    // grace, same kernel, but its `flagged` input is the WHOLE party's flag rather
+    // than this bot's own: the between-pulls gate waits for every member to be
+    // topped up, so one member held in combat by an aura is enough to make the
+    // wait unsatisfiable. It needs its own streak because a different input means
+    // a different streak — folding it into flaggedNoEngageSinceMs would make the
+    // driving ladder wait out a grace it never used to.
+    uint32 partyFlaggedNoEngageSinceMs = 0;
+    ObjectGuid glideHazardIgnore;    // sphere behind the last interrupt
 
     // --- blocking-door interaction ----------------------------------------
     // Last door the bot clicked open and when, so the door-blocked action can
@@ -93,6 +188,20 @@ struct DcApproachState
     uint32 longPathExpiresMs   = 0;  // cache TTL deadline (getMSTime); 0 = force rebuild
     uint64 pendingPathJob      = 0;  // in-flight async build job id (0 = none)
     uint32 pendingPathSinceMs  = 0;  // when the pending job was submitted (watchdog)
+    Position pendingPathStartPos;    // bot pos at submit; a result whose start the
+                                     // bot has since left far behind (teleport /
+                                     // event relocation mid-build) is stale and
+                                     // discarded at drain instead of installed
+
+    // Follower-cursor snapshot at the last install / TTL re-arm. EnsureLongPath
+    // defers the TTL rebuild while the cursor has advanced past this baseline
+    // (and the bot isn't position-stuck): a 15s TTL expiry on a route the bot is
+    // actively walking otherwise triggers a churny full A*+Finalize rebuild of a
+    // perfectly good path and resets the cursor. The TTL is honoured only once
+    // forward progress stalls. Reset to 0/0 by InstallLongPath (which also zeroes
+    // the follower state), so the baseline always matches a fresh cursor.
+    uint32 lastProgressSegmentIdx = 0;
+    uint32 lastProgressPointIdx   = 0;
 
     // Full reset: every approach AND long-path-cache field. Used on dc on/off,
     // death, all-cleared, and every pull interrupt — the run-state teardown.
@@ -107,14 +216,28 @@ struct DcApproachState
     {
         lastTargetEntry     = newEntry;
         stuckCount          = 0;
-        posStuckTicks       = 0;
-        doorWalkInStuckTicks = 0;
+        routeGlideWatch.Reset();
+        doorWalkInWatch.Reset();
+        pursuitWatch.Reset();
+        finalApproachWatch.Reset();
+        recoveryProgressWatch.Reset();
+        longRouteDeferWatch.Reset();
+        longRouteDeferTarget.Clear();
+        longRouteDeferBlown = false;
         rebuildAttempts     = 0;
-        doneNotEngagedTicks = 0;
-        pursuitFailTicks    = 0;
+        resnapAttempts      = 0;
+        partyNotReadyTicks  = 0;
         lastPos             = Position();
         skirtOrbitDir       = 0;
         skirtOrbitTarget.Clear();
+        avoidOrbitDir       = 0;
+        avoidOrbitSphere.Clear();
+        chaseTarget.Clear();
+        chaseAnchor         = Position();
+        chaseOrigin         = Position();
+        chaseHoldSince      = 0;
+        glideHazardProbeMs  = 0;
+        glideHazardIgnore.Clear();
         doorStallGuid.Clear();
         doorStallSinceMs    = 0;
         doorStallLastMs     = 0;
@@ -125,8 +248,8 @@ struct DcApproachState
     // re-pursued cleanly instead of staying latched off the pursuit shortcut.
     void OnEnteredEngageRange()
     {
-        doneNotEngagedTicks = 0;
-        pursuitFailTicks    = 0;
+        finalApproachWatch.Reset();
+        pursuitWatch.Reset();
     }
 };
 

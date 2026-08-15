@@ -5,8 +5,11 @@
 
 #include "DungeonClearMath.h"
 
+#include "DungeonClearTuning.h"  // DC_PI
+
 #include <cmath>
 #include <cstddef>
+#include <limits>
 
 std::uint32_t DungeonClearMath::EstimateAggroCount(std::vector<DynPullMob> const& mobs,
                                                    std::size_t targetIdx,
@@ -161,6 +164,48 @@ bool DungeonClearMath::ShouldAbortPullForCc(bool impaired, std::uint32_t ccSince
     return elapsed >= graceMs;
 }
 
+bool DungeonClearMath::ShouldTripCampSafety(bool inCombat, float healthPct,
+                                            float safetyHpPct,
+                                            bool attackerIsPullTarget,
+                                            std::uint32_t since, std::uint32_t now,
+                                            std::uint32_t graceMs,
+                                            std::uint32_t& sinceOut)
+{
+    bool const qualifying = inCombat && safetyHpPct > 0.0f &&
+                            healthPct < safetyHpPct && !attackerIsPullTarget;
+    if (!qualifying)
+    {
+        sinceOut = 0;
+        return false;
+    }
+    // Arm the latch on the first qualifying tick. Never store 0 (it means
+    // "fine"), so a follower qualifying at the very first millisecond still
+    // latches. Same contract as ShouldAbortPullForCc.
+    std::uint32_t const start = since != 0 ? since : (now != 0 ? now : 1u);
+    sinceOut = start;
+    std::uint32_t const elapsed = now >= start ? now - start : 0u;
+    return elapsed >= graceMs;
+}
+
+bool DungeonClearMath::ShouldStandDownForPull(bool packIsPullsOwn, bool pullPhaseIdle)
+{
+    if (packIsPullsOwn)
+        return true;          // the pipeline is (or is about to be) working it
+    return !pullPhaseIdle;    // in flight: never thrash the maneuver
+}
+
+bool DungeonClearMath::ShouldReleaseStandingPull(bool effectiveOn, bool standing,
+                                                 bool partyInCombat, bool holdingPhase,
+                                                 bool bossPullback)
+{
+    if (effectiveOn || !standing)
+        return false;             // the pull owns itself / nothing left standing
+    if (bossPullback)
+        return false;             // pull-back drags run with pull mode off by design
+    // Never dismantle a maneuver in flight — nor a camp anyone is still fighting at.
+    return !partyInCombat && !holdingPhase;
+}
+
 bool DungeonClearMath::ShouldDropPullVerdict(bool targetPresent, std::uint32_t lostSince,
                                              std::uint32_t now, std::uint32_t graceMs,
                                              std::uint32_t& lostSinceOut)
@@ -222,6 +267,49 @@ bool DungeonClearMath::ShouldWaitForPatrol(std::uint32_t fullCount,
     return elapsed < waitMs;
 }
 
+bool DungeonClearMath::ShouldMusterForScriptedStage(bool stagePending, bool toppedUp,
+                                                    std::uint32_t waitSince,
+                                                    std::uint32_t now,
+                                                    std::uint32_t waitMs,
+                                                    std::uint32_t minMs,
+                                                    std::uint32_t& waitSinceOut)
+{
+    if (!stagePending)
+    {
+        waitSinceOut = 0;
+        return false;
+    }
+    // Never armed and already topped up: the healthy case — arm nothing, pull now.
+    if (waitSince == 0 && toppedUp)
+    {
+        waitSinceOut = 0;
+        return false;
+    }
+    // Arm on the first short tick. Never store 0 (it means "clear"), so a muster
+    // that begins at the very first millisecond still latches.
+    std::uint32_t const start = waitSince != 0 ? waitSince : (now != 0 ? now : 1u);
+    waitSinceOut = start;
+    // Guard the unsigned subtraction (the now==0 corner can leave start ahead of
+    // now).
+    std::uint32_t const elapsed = now >= start ? now - start : 0u;
+    // Substance floor: an armed muster holds through min(minMs, waitMs) even if
+    // the percentages close first. The floors going green one tick after arming
+    // means an AoE heal crossed a line, not that anyone drank — and the raised
+    // rest targets need a few seconds of sitting to mean anything. The min()
+    // keeps waitMs == 0 as "muster disabled outright".
+    if (elapsed < std::min(minMs, waitMs))
+        return true;
+    if (toppedUp)
+    {
+        waitSinceOut = 0;
+        return false;
+    }
+    // Hold while inside the budget; once it elapses, proceed on the ordinary
+    // floors — the latch stays armed so the muster does not re-fire on the same
+    // stage.
+    return elapsed < waitMs;
+}
+
 bool DungeonClearMath::ShouldPlantEarly(std::vector<float> const& attackerDists,
                                         float glueRadius,
                                         std::uint32_t glueTicksNeeded, bool losPull,
@@ -264,7 +352,39 @@ bool DungeonClearMath::ShouldPlantEarly(std::vector<float> const& attackerDists,
     return plantTicks >= glueTicksNeeded;
 }
 
-bool DungeonClearMath::ShouldReleaseFollower(bool isHealer,
+float DungeonClearMath::PullTagStopDistance(float aggroRange, float meleeReach,
+                                            std::uint32_t closingMs,
+                                            std::uint32_t graceMs,
+                                            float creepYardsPerSec, float creepFloor,
+                                            bool& forceTagOut)
+{
+    forceTagOut = false;
+
+    // Two yards inside the radius: far enough in that the arrival itself is a
+    // relocation across the notice threshold, close enough to the edge that the pull
+    // is a pull rather than a face-pull.
+    float stop = aggroRange - 2.0f;
+
+    // The creep. Bounded by `creepFloor`, which is the whole difference between an
+    // ordinary pull and a scripted stage — see the header.
+    if (closingMs > graceMs && creepYardsPerSec > 0.0f)
+    {
+        stop -= ((closingMs - graceMs) / 1000.0f) * creepYardsPerSec;
+        if (stop < creepFloor)
+            stop = creepFloor;
+    }
+
+    // Body contact is the last floor either way. If the pack's aggro is at or below
+    // melee reach, closing cannot cross it and the caller has to swing.
+    if (stop <= meleeReach)
+    {
+        forceTagOut = true;
+        return meleeReach;
+    }
+    return stop;
+}
+
+bool DungeonClearMath::ShouldReleaseFollower(bool isHealer, bool alreadyInCombat,
                                              std::uint32_t combatSinceMs,
                                              std::uint32_t now, std::uint32_t leadMs,
                                              float tankHealthPct, float panicHpPct)
@@ -272,6 +392,14 @@ bool DungeonClearMath::ShouldReleaseFollower(bool isHealer,
     // Healers are never held: a withheld heal is a wipe, and a heal does not rip
     // threat off the tank the way a DPS opener does.
     if (isHealer)
+        return true;
+    // Already in combat: the lead exists only to stop a FRESH, out-of-combat DPS
+    // from stealing aggro on the opener. A follower already flagged in combat (the
+    // tank pulled and dragged the pack out of its line of sight) is on the threat
+    // table already — it cannot over-aggro by walking into sight, and holding it
+    // strands it with no DC-owned behavior for the tick, exactly where a revived
+    // stock follow-master would walk it to the human. Release it onto the fight.
+    if (alreadyInCombat)
         return true;
     // Feature off.
     if (leadMs == 0)
@@ -289,6 +417,26 @@ bool DungeonClearMath::ShouldReleaseFollower(bool isHealer,
     // unsigned subtraction against a combatSince stamped a tick ahead of `now`.
     std::uint32_t const elapsed = now > combatSinceMs ? now - combatSinceMs : 0u;
     return elapsed >= leadMs;
+}
+
+bool DungeonClearMath::ShouldHandoffFizzledPull(bool pulledAliveIdle, bool sameTarget,
+                                                std::uint32_t maxFizzles,
+                                                std::uint32_t& fizzleCount)
+{
+    // The pack died or is still being fought: not a fizzle. Clear the latch.
+    if (!pulledAliveIdle)
+    {
+        fizzleCount = 0;
+        return false;
+    }
+    // A fizzle: extend the run for the same pack, or restart at 1 for a new one.
+    if (sameTarget)
+        ++fizzleCount;
+    else
+        fizzleCount = 1;
+    // Hand off once the same pack has fizzled maxFizzles times in a row. maxFizzles
+    // == 0 hands off on the first fizzle.
+    return fizzleCount >= maxFizzles;
 }
 
 float DungeonClearMath::DistSqToSegment2D(float px, float py,
@@ -312,6 +460,68 @@ float DungeonClearMath::DistSqToSegment2D(float px, float py,
     float const dx = px - cx;
     float const dy = py - cy;
     return dx * dx + dy * dy;
+}
+
+bool DungeonClearMath::NearestPointOnPolyline2D(std::vector<G3D::Vector3> const& route,
+                                                float px, float py, G3D::Vector3& out)
+{
+    if (route.size() < 2)
+        return false;
+
+    float bestDist2 = std::numeric_limits<float>::max();
+    for (std::size_t i = 0; i + 1 < route.size(); ++i)
+    {
+        G3D::Vector3 const& a = route[i];
+        G3D::Vector3 const& b = route[i + 1];
+        float const ex = b.x - a.x;
+        float const ey = b.y - a.y;
+        float const len2 = ex * ex + ey * ey;
+
+        // Degenerate leg (two coincident route points — the smoother emits them
+        // at anchor joins): the whole leg IS point `a`.
+        float t = 0.0f;
+        if (len2 > 1e-6f)
+        {
+            t = ((px - a.x) * ex + (py - a.y) * ey) / len2;
+            if (t < 0.0f) t = 0.0f;
+            else if (t > 1.0f) t = 1.0f;
+        }
+
+        float const cx = a.x + t * ex;
+        float const cy = a.y + t * ey;
+        float const dx = px - cx;
+        float const dy = py - cy;
+        float const d2 = dx * dx + dy * dy;
+        if (d2 < bestDist2)
+        {
+            bestDist2 = d2;
+            out = G3D::Vector3(cx, cy, a.z + t * (b.z - a.z));
+        }
+    }
+    return true;
+}
+
+std::size_t DungeonClearMath::PathProgressCursor(std::vector<G3D::Vector3> const& route,
+                                                 float botX, float botY, float botZ)
+{
+    std::size_t cursor = 0;
+    float best = std::numeric_limits<float>::max();
+    for (std::size_t i = 0; i < route.size(); ++i)
+    {
+        float const dx = route[i].x - botX;
+        float const dy = route[i].y - botY;
+        float const dz = route[i].z - botZ;
+        // 3D, squared. The Z term is the whole point: it is what stops a route
+        // vertex a storey overhead from out-bidding the vertex on the floor the
+        // bot is actually standing on. See the header for the Shadowfang case.
+        float const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < best)
+        {
+            best = d2;
+            cursor = i;
+        }
+    }
+    return cursor;
 }
 
 std::size_t DungeonClearMath::FindTrailRejoin(std::vector<Position> const& crumbs,
@@ -399,16 +609,16 @@ std::size_t DungeonClearMath::SelectHealTarget(std::vector<HealCandidate> const&
     return best;
 }
 
-std::vector<Position> DungeonClearMath::HealStandoffCandidates(Position const& target,
-                                                               Position const& bot,
-                                                               float standoffRadius,
-                                                               std::uint32_t ringPoints)
+std::vector<Position> DungeonClearMath::StandoffCandidates(Position const& target,
+                                                           Position const& bot,
+                                                           float standoffRadius,
+                                                           std::uint32_t ringPoints)
 {
     std::vector<Position> out;
     out.reserve(ringPoints + 1);
 
-    // Base direction: from the target toward the bot's current side, so the first
-    // candidate is the shortest reposition. Degenerate (bot on target) -> +X.
+    // Base direction: from the center toward the bot's current side, so the first
+    // candidate is the shortest reposition. Degenerate (bot on center) -> +X.
     float dx = bot.GetPositionX() - target.GetPositionX();
     float dy = bot.GetPositionY() - target.GetPositionY();
     float const len = std::sqrt(dx * dx + dy * dy);
@@ -429,7 +639,7 @@ std::vector<Position> DungeonClearMath::HealStandoffCandidates(Position const& t
     // First candidate dead on the bot's side, then fan out alternately +/- so
     // nearer-to-bot angles are tried before the far side of the target.
     emit(baseAngle);
-    float const step = (2.0f * float(M_PI)) / float(ringPoints + 1);
+    float const step = (2.0f * DC_PI) / float(ringPoints + 1);
     for (std::uint32_t k = 1; k <= ringPoints; ++k)
     {
         float const off = step * float((k + 1) / 2);

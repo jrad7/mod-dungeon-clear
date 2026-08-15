@@ -240,6 +240,13 @@ void DcFollowerLifecycle::ApplyFollowerPassive(Player* follower)
             return;
     }
 
+    // Fresh hold -> fresh camp-safety grace latch. The latch lives in the
+    // follower's own pull-context copy and is never Reset() there (the FSM reset
+    // runs on the leader), so a stale timestamp from a previous hold would
+    // defeat PullSafetyGrace and fire the valve on the first qualifying tick.
+    botAI->GetAiObjectContext()
+        ->GetValue<DcPullContext&>(DcKey::PullContext)->Get().campSafetySince = 0;
+
     // Healers are deliberately NOT made fully passive: they must keep casting
     // heals on the tank through the drag-back. But they ARE pinned with the
     // "stay" strategy, which disables EVERY stock mover that voluntarily checks
@@ -445,7 +452,12 @@ void DcFollowerLifecycle::ReapStrandedPassives()
         // the DcPullPhase contract: "Idle and Engage release them"), along with
         // pull off / dc off / paused / leader gone. The single authoritative
         // teardown — fires regardless of the follower's own engine state.
-        if (!inPull || !DcLeaderSignal::IsPullPhaseHolding(phase))
+        // A standing camp-safety release (the valve fired but the drag was KEPT —
+        // see DcPullContext::SafetyRelease) strips the party's passive at once
+        // even though the leader is still in a holding phase: the whole point of
+        // the release is that the held followers fight back NOW.
+        bool const released = DcLeaderSignal::IsLeaderPullHoldReleased(player);
+        if (!inPull || !DcLeaderSignal::IsPullPhaseHolding(phase) || released)
         {
             // The graceful pull commit (leader reached camp and flipped to
             // Engage, so inPull is still true) can hold the party passive a
@@ -453,9 +465,11 @@ void DcFollowerLifecycle::ReapStrandedPassives()
             // pile on — the player-side analogue of PullPetReleaseDelay, and the
             // clock the pet delay then stacks on. A hard exit (run ended,
             // paused, dc off, leader gone -> !inPull) always releases at once,
-            // as does a zero delay.
+            // as does a zero delay — and so does a camp-safety release, whether
+            // the drag was kept (released above) or the pull was aborted into
+            // Engage (partyReleased survives that transition for exactly this).
             float const delaySec =
-                inPull ? DcSettings::GetFloat(player, "PullPlayerReleaseDelay") : 0.0f;
+                (inPull && !released) ? DcSettings::GetFloat(player, "PullPlayerReleaseDelay") : 0.0f;
             if (delaySec <= 0.0f)
             {
                 RemoveFollowerPassive(player);
@@ -488,8 +502,18 @@ void DcFollowerLifecycle::ReapStrandedPassives()
 
         // Camp-safety valve: a held, passive follower taking real damage (a
         // patrol clipped camp, or the pull went sideways) can't defend itself —
-        // abort the pull so the whole party drops passive and fights back. This
-        // is an emergency, so it bypasses the graceful release delay entirely.
+        // release the party so it can fight back. This is an emergency, so it
+        // bypasses the graceful release delay entirely. Two refinements over the
+        // original raw HP% check (both mirror the CC-assist gate's shape):
+        //   1. Attribution: damage from the pack being DRAGGED is an ordinary
+        //      drag taking splash, not a failed pull — the valve must not throw
+        //      the drag away for it. Only a non-pull attacker qualifies.
+        //   2. Grace (PullSafetyGrace): the qualifying state must persist, so a
+        //      single stray hit that the follower shrugs off doesn't dump the
+        //      whole maneuver on a flicker.
+        // The release itself KEEPS an in-flight drag (ReleaseLeaderPullHold):
+        // aborting a Returning drag fights the pack wherever the party happens
+        // to be standing — the exact over-pull the drag exists to prevent.
         // Through DcSettings (cached conf read + per-run override), not raw
         // sConfigMgr — a per-tick GetOption here re-walks the config map and
         // re-logs a missing-property warning every tick a pull is held.
@@ -497,11 +521,65 @@ void DcFollowerLifecycle::ReapStrandedPassives()
         if (player->IsInCombat() && safetyHp > 0.0f &&
             player->GetHealthPct() < safetyHp)
         {
-            DC_PULL_INFO("[DC:{}] advanced-pull SAFETY: passive follower at {:.0f}% in "
-                         "combat -> aborting pull, releasing party",
-                         player->GetName(), player->GetHealthPct());
-            DcLeaderSignal::AbortLeaderPull(player);
-            RemoveFollowerPassive(player);
+            // Attacker attribution: does EVERYTHING currently hitting this
+            // follower belong to the pack being dragged? Same destination-pack
+            // test as EnRoutePackAvoidPoint: the tagged target itself, its
+            // formation, or proximity to it for the (common) unformationed pack.
+            bool attackerIsPullTarget = false;
+            ObjectGuid const pullGuid = DcLeaderSignal::GetLeaderPullTarget(player);
+            Unit* const pullTarget =
+                pullGuid ? ObjectAccessor::GetUnit(*player, pullGuid) : nullptr;
+            if (pullTarget && !player->getAttackers().empty())
+            {
+                CreatureGroup const* targetGroup = pullTarget->ToCreature()
+                    ? pullTarget->ToCreature()->GetFormation() : nullptr;
+                uint32 const targetFormation = targetGroup ? targetGroup->GetId() : 0u;
+                constexpr float kPackRadius = 12.0f;  // = EnRoutePackAvoidPoint's
+                attackerIsPullTarget = true;
+                for (Unit* a : player->getAttackers())
+                {
+                    if (!a || a == pullTarget)
+                        continue;
+                    Creature const* c = a->ToCreature();
+                    CreatureGroup const* grp = c ? c->GetFormation() : nullptr;
+                    if (targetFormation && grp && grp->GetId() == targetFormation)
+                        continue;
+                    if (pullTarget->GetExactDist2d(a) <= kPackRadius)
+                        continue;
+                    attackerIsPullTarget = false;
+                    break;
+                }
+            }
+
+            // Latch lives in the FOLLOWER's own pull-context copy (the leader's
+            // copy carries the FSM; a follower's is otherwise unused) — armed
+            // fresh per hold by ApplyFollowerPassive.
+            uint32& since = GET_PLAYERBOT_AI(player)->GetAiObjectContext()
+                ->GetValue<DcPullContext&>(DcKey::PullContext)->Get().campSafetySince;
+            uint32 const graceMs =
+                uint32(DcSettings::GetFloat(player, "PullSafetyGrace") * 1000.0f);
+            uint32 sinceOut = since;
+            bool const trip = DungeonClearMath::ShouldTripCampSafety(
+                /*inCombat*/ true, player->GetHealthPct(), safetyHp,
+                attackerIsPullTarget, since, getMSTime(), graceMs, sinceOut);
+            since = sinceOut;
+            if (trip)
+            {
+                DC_PULL_INFO("[DC:{}] advanced-pull SAFETY: passive follower at "
+                             "{:.0f}% in combat with a non-pull attacker -> "
+                             "releasing party",
+                             player->GetName(), player->GetHealthPct());
+                DcLeaderSignal::ReleaseLeaderPullHold(player);
+                RemoveFollowerPassive(player);
+            }
+        }
+        else
+        {
+            // Not qualifying at all — keep the grace latch clear so the next
+            // qualifying spell starts its own grace from scratch.
+            if (PlayerbotAI* ai = GET_PLAYERBOT_AI(player))
+                ai->GetAiObjectContext()
+                    ->GetValue<DcPullContext&>(DcKey::PullContext)->Get().campSafetySince = 0;
         }
     }
 }

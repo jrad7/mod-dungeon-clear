@@ -18,6 +18,7 @@
 #include "Ai/Dungeon/DungeonClear/Data/DungeonSpawnGraph.h"
 #include "Ai/Dungeon/DungeonClear/Util/CorridorCenter.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearGeometry.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"  // DC_PI
 #include "Ai/Dungeon/DungeonClear/Util/LongRangePathfinder.h"
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
 
@@ -51,10 +52,10 @@ namespace
     // ±60° of the bee-line direction; if none produce a usable path, give
     // up the stride.
     constexpr float ARC_ANGLES_RAD[] = {
-        static_cast<float>(M_PI) / 6.0f,    //  30°
-        -static_cast<float>(M_PI) / 6.0f,   // -30°
-        static_cast<float>(M_PI) / 3.0f,    //  60°
-        -static_cast<float>(M_PI) / 3.0f,   // -60°
+        DC_PI / 6.0f,    //  30°
+        -DC_PI / 6.0f,   // -30°
+        DC_PI / 3.0f,    //  60°
+        -DC_PI / 3.0f,   // -60°
     };
 
     // Fraction of STRIDE_LEN each fallback direction probes, tried far-first.

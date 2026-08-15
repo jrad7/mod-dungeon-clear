@@ -7,8 +7,10 @@ handling doors and scripted events along the way. You deal damage and let the
 tank run the dungeon.
 
 Routes are generated on the fly from the live navigation mesh, with no waypoints
-or hardcoded paths, so the clear works in any instance. It runs against a
-**stock, unmodified mod-playerbots** checkout with no playerbots source edits.
+or hardcoded paths, so the clear works in any instance — the hand-built data the
+module does carry is for scripted events and known navmesh breaks, not for
+routing. It runs against a **stock, unmodified mod-playerbots** checkout with no
+playerbots source edits.
 
 > ## Use the companion addon
 >
@@ -26,14 +28,22 @@ While enabled, the tank bot handles a run end to end:
   doors, and multi-wing maps.
 - **Pulling trash** on the way to each boss, with selectable pull styles (see
   [Pull modes](#pull-modes)).
-- **Scripted events** that gate progress in many classic dungeons: levers,
-  altars, gongs, freed prisoners, escorts, and off-mesh drops (see
-  [Scripted dungeon events](#scripted-dungeon-events)).
+- **Scripted events** that gate progress in many classic and Burning Crusade
+  dungeons: levers, altars, gongs, freed prisoners, escorts, wave set-pieces,
+  and off-mesh drops (see [Scripted dungeon events](#scripted-dungeon-events)).
 - **Looting** finished corpses, with a quality floor and skip logic so the party
   does not camp on corpses with nothing worth taking.
 - **Resting** between fights, tracking playerbots' own eat and drink thresholds.
 - **Party support**: followers stay with the tank, healers reposition to keep the
   tank in line of sight, and the group regroups after a fight pulls it apart.
+- **Death recovery**: when a member dies and a living Priest, Paladin, Shaman, or
+  Druid remains, the run holds while they resurrect the fallen and resumes once
+  everyone is back up, instead of ending on the first death (`DungeonClear.PostCombatRez`).
+  The run still ends on a full wipe, with no living resurrector, or on timeout.
+
+**Heroic difficulty** is supported: the tank pulls more carefully, several
+settings carry their own heroic values, and a few events fire only on heroic.
+See [Configuration](#configuration).
 
 ## Requirements
 
@@ -51,8 +61,9 @@ While enabled, the tank bot handles a run end to end:
 ## Usage
 
 Both input methods control the same behaviour and act on the group's **tank**
-bot. Commands must come from a real player in the bot's group. `.dc on` requires
-being inside a dungeon.
+bot. They must come from a real player in the bot's group, and `.dc on` requires
+being inside a dungeon. (`.dc spectate` is the exception — it acts on your own
+session, so it needs no group.)
 
 | Slash command | In-party chat keyword | What it does |
 |---|---|---|
@@ -64,7 +75,11 @@ being inside a dungeon.
 | `.dc status` | `dc status` | Print the current run status. |
 | `.dc bosses` | `dc bosses` | List the dungeon's bosses and kill state. |
 | `.dc go <boss>` | | Route directly to a named boss. |
-| `.dc spectate` | | Toggle the free-fly spectator camera. |
+| `.dc config` | | Print the effective `DungeonClear.*` values for the current run, marking addon overrides and heroic defaults. |
+| `.dc spectate` | | Toggle the free-fly spectator camera. `.dc spectate follow [name]` rides a bot instead. |
+
+There is also `.dc test`, a GM-only automated test harness — see
+[Automated test runs](#automated-test-runs), below.
 
 Non-tank party bots follow the tank only while it has dungeon clear enabled, then
 revert to the player automatically.
@@ -91,17 +106,22 @@ wiki page for how each mode works in detail and how to tune Dynamic.
 
 ## Scripted dungeon events
 
-Many classic instances gate progress behind a scripted step the party must
-perform: pull a lever, click an altar, ring a gong, free a prisoner, escort an
-NPC, or leap an off-mesh gap. mod-dungeon-clear performs these automatically as
-part of the normal boss route, with no player input.
+Many instances gate progress behind a scripted step the party must perform: pull
+a lever, click a panel, ring a gong, free a prisoner, escort an NPC, survive a
+wave set-piece, or cross a break in the navmesh. mod-dungeon-clear performs
+these automatically as part of the normal boss route, with no player input.
 
-Event support currently covers Deadmines, Shadowfang Keep, Wailing Caverns,
-Uldaman, Sunken Temple, Razorfen Downs, Scarlet Monastery, Zul'Farrak, Blackrock
-Depths, Scholomance, Stratholme, and Dire Maul, and coverage continues to expand.
-Faction-specific events run only for the relevant side. If an event cannot
-complete (for example, a scripted NPC the party let die), the run either stalls
-for the player or skips the step, depending on whether the step is required.
+Event support currently covers, in classic: Deadmines, Shadowfang Keep, Wailing
+Caverns, Uldaman, Sunken Temple, Razorfen Downs, Scarlet Monastery, Zul'Farrak,
+Blackrock Depths, Scholomance, Stratholme, and Dire Maul; and in Burning
+Crusade: Hellfire Ramparts, Blood Furnace, Shattered Halls, Slave Pens,
+Underbog, Steamvault, Sethekk Halls, Mechanar, Arcatraz, Black Morass, Old
+Hillsbrad, and Magisters' Terrace. Coverage continues to expand.
+
+Faction-specific events run only for the relevant side, and heroic-only events
+never fire on a normal run. If an event cannot complete (for example, a scripted
+NPC the party let die), the run either stalls for the player or skips the step,
+depending on whether the step is required.
 
 The full per-dungeon list is on the
 [Scripted Dungeon Events](https://github.com/jrad7/mod-dungeon-clear/wiki/Scripted-Dungeon-Events)
@@ -124,6 +144,13 @@ tuning. See the
 [Configuration reference](https://github.com/jrad7/mod-dungeon-clear/wiki/Configuration)
 wiki page.
 
+Any setting can be given a **heroic-difficulty value** by appending `.Heroic` to
+its name (`DungeonClear.PullDynamicMaxLeeroyMobs.Heroic = 2`), which applies
+while the run is inside a dungeon at heroic difficulty. Several options ship
+with a heroic default that differs from the normal one; the conf lists them, and
+`.dc config` marks them with an `H`. Resolution order is per-run override →
+`<key>.Heroic` → `<key>` → built-in default.
+
 A few mod-playerbots ranges also affect runs (`LootDistance`, `ReactDistance`,
 `SightDistance`, `FollowDistance`). The rest gate tracks playerbots' own eat and
 drink thresholds automatically, so no playerbots config change is required.
@@ -135,6 +162,25 @@ factories into the engine's shared registries on the first world tick, and
 registers a `.dc` command plus a login hook for the `dungeon clear` strategy. It
 touches **no** playerbots file. Details:
 [How it integrates](https://github.com/jrad7/mod-dungeon-clear/wiki/How-It-Integrates).
+
+## Automated test runs
+
+`.dc test` is a **GM-only** harness, not part of normal play. One command rolls
+a random 5-bot party (tank, healer, three DPS on five different classes), levels
+and gears it, sends it to a dungeon entrance and lets it clear the place on its
+own. You stay out of the party and watch, or `.dc test watch` the camera along.
+Every run records its seed, so a run that hits a bug can be replayed with the
+exact same party, and `.dc test plan` runs the same dungeon N times to give you
+a success *rate* rather than an anecdote.
+
+**[Test Runs](https://github.com/jrad7/mod-dungeon-clear/wiki/Test-Runs)** —
+the full command reference, gear and party options, plans, watching, the
+headless test-driver character, and where the results are written.
+
+**[Test Deck](https://github.com/jrad7/mod-dungeon-clear/wiki/Test-Deck)** — the
+web frontend for those runs, shipped in `testdeck/`. Log in with a game GM
+account, pick a dungeon from a grid, and watch the party live; built to be
+handed to testers without shell access.
 
 ## License
 

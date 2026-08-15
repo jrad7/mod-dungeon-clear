@@ -6,8 +6,8 @@
 #include "gtest/gtest.h"
 
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
-#include "Ai/Dungeon/DungeonClear/Data/EventConditionRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Overrides/BossRosterRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 
 namespace
@@ -18,6 +18,11 @@ namespace
         p.eventId = eventId;
         p.stepIndex = stepIndex;
         p.stepStartMs = stepStartMs;
+        // Drive stamps progressMs on activation and on every high-water step
+        // advance; baseline it to the step start so the forward-progress watchdog
+        // isn't spuriously charged for time before the scenario under test began.
+        p.maxStepIndex = stepIndex;
+        p.progressMs = stepStartMs;
         return p;
     }
 }
@@ -84,9 +89,9 @@ TEST(EventBuilderTest, JumpStepDefaultRadius)
 
 TEST(EventBuilderTest, OptionalAndConditionalFlags)
 {
-    DungeonEvent e = EventBuilder(1, 1, "c").Conditional(42).Wait(500).Optional().Build();
+    DungeonEvent e = EventBuilder(1, 1, "c").Conditional([](Player*, AiObjectContext*) { return false; }).Wait(500).Optional().Build();
     EXPECT_EQ(e.activation, EventActivation::Conditional);
-    EXPECT_EQ(e.conditionId, 42u);
+    EXPECT_TRUE(static_cast<bool>(e.condition));
     EXPECT_FALSE(e.required);
     ASSERT_EQ(e.steps.size(), 1u);
     EXPECT_EQ(e.steps[0].kind, EventStepKind::Wait);
@@ -184,6 +189,77 @@ TEST(DungeonEventAdvance, EscortCreatureNeverTimesOut)
     EXPECT_EQ(DungeonEventExecutor::Advance(ev, p, StepResult::Running, 10u * 60u * 1000u, 30000),
               EventDriveOutcome::Running);
     EXPECT_EQ(p.stepIndex, 0u);  // still on the escort step
+}
+
+TEST(DungeonEventAdvance, RewindLoopReDoningStepZeroIsCaughtByForwardProgress)
+{
+    // Regression: Steamvault's "Open the Main Chambers Door" wedged for a whole
+    // run with no stall and no log. The stale-gap rewind fired every tick (the
+    // tank's out-of-combat AI tick is slower than the old flat 1s threshold), so
+    // each Drive re-ran the already-satisfied leading MoveTo, which reports Done
+    // and re-stamps stepStartMs. The per-step timeout could therefore never
+    // accumulate, the UseGO step was never reached, and the event returned Running
+    // forever. The high-water step index is the clock the rewind can't forge.
+    DungeonEvent ev = EventBuilder(545, 1, "Open the Main Chambers Door")
+                          .MoveTo(1.0f, 2.0f, 3.0f, 6.0f)
+                          .UseGO(184126, 14.0f)
+                          .Wait(6000)
+                          .Build();
+
+    DungeonEventProgress p = Prog(1, 0, 0);
+    uint32 now = 0;
+
+    // Simulate the loop: rewind to step 0, MoveTo reports Done, step -> 1, repeat.
+    // The first Done is genuine forward progress (0 -> 1) and stamps progressMs;
+    // every later one is not.
+    for (int i = 0; i < 100; ++i)
+    {
+        now += 2000;  // a tick slower than the old 1s gap threshold
+        p.stepIndex = 0;
+        p.stepStartMs = now;  // what the rewind used to do
+        EventDriveOutcome const out =
+            DungeonEventExecutor::Advance(ev, p, StepResult::Done, now, 30000);
+        if (out == EventDriveOutcome::Stalled)
+            return;  // escalated as it should
+    }
+    FAIL() << "rewind loop never escalated: the event would run Running forever";
+}
+
+TEST(DungeonEventAdvance, ForwardProgressWatchdogDoesNotFireWhileStepsAdvance)
+{
+    // The watchdog must only catch a wedge. An event whose steps keep advancing —
+    // even slowly, well past a single step timeout in total — is healthy.
+    DungeonEvent ev = EventBuilder(545, 2, "e")
+                          .MoveTo(0.0f, 0.0f, 0.0f, 5.0f)
+                          .MoveTo(1.0f, 0.0f, 0.0f, 5.0f)
+                          .MoveTo(2.0f, 0.0f, 0.0f, 5.0f)
+                          .Wait(1000)
+                          .Build();
+    DungeonEventProgress p = Prog(2, 0, 0);
+
+    uint32 now = 0;
+    for (int i = 0; i < 3; ++i)
+    {
+        now += 25000;  // each step takes most of, but not all of, its timeout
+        EXPECT_EQ(DungeonEventExecutor::Advance(ev, p, StepResult::Done, now, 30000),
+                  EventDriveOutcome::Running);
+    }
+    now += 25000;
+    EXPECT_EQ(DungeonEventExecutor::Advance(ev, p, StepResult::Done, now, 30000),
+              EventDriveOutcome::Completed);
+}
+
+TEST(DungeonEventAdvance, ForwardProgressWatchdogSpareEscortCreature)
+{
+    // EscortCreature owns its own liveness (see EscortCreatureNeverTimesOut); the
+    // forward-progress watchdog must respect that exemption too, or a long escort
+    // that legitimately sits on one step would be failed at 3x the step timeout.
+    DungeonEvent ev = EventBuilder(43, 3, "e")
+                          .EscortCreature(3678, 0, 3654, 7)
+                          .Build();
+    DungeonEventProgress p = Prog(3, 0, 0);
+    EXPECT_EQ(DungeonEventExecutor::Advance(ev, p, StepResult::Running, 10u * 60u * 1000u, 30000),
+              EventDriveOutcome::Running);
 }
 
 TEST(DungeonEventAdvance, BlockedAlwaysStallsEvenWhenOptional)
@@ -479,11 +555,16 @@ TEST(DungeonEventRegistryTest, BlackrockRingOfLawEventShape)
     EXPECT_EQ(e->steps[1].hookId, 1u);
 
     // 3. garrison the centre until TYPE_RING_OF_LAW (1) reaches DONE (3); long
-    //    timeout for the boss fight.
+    //    timeout for the boss fight. The garrison re-runs the SAME start hook
+    //    while it holds, because the state is not monotonic (npc_grimstone's
+    //    no-victim watchdog resets it to NOT_STARTED).
     EXPECT_EQ(e->steps[2].kind, EventStepKind::MoveTo);
     EXPECT_EQ(e->steps[2].instanceDataId, 1);    // TYPE_RING_OF_LAW
     EXPECT_EQ(e->steps[2].instanceDataMin, 3u);  // EncounterState::DONE
     EXPECT_EQ(e->steps[2].timeoutMs, 600000u);
+    EXPECT_EQ(e->steps[2].hookId, 1u);           // .WhileHolding(EnsureRingStarted)
+    EXPECT_FLOAT_EQ(e->steps[2].radius, e->steps[0].radius)
+        << "walk-in and hold must agree on where the centre is";
 }
 
 // Deadmines Defias Cannon: walk to the cannon, fire it (Custom hook 2 casts the
@@ -647,8 +728,10 @@ TEST(DungeonEventRegistryTest, UnderbogDropDownEventShape)
     EXPECT_FLOAT_EQ(hop2.landY, -471.68f);
     EXPECT_FLOAT_EQ(hop2.landZ, 24.32f);
 
-    // Anchored, so it is not in the map's conditional set.
-    EXPECT_TRUE(DungeonEventRegistry::Conditional(546).empty());
+    // Anchored, so it is not itself in the map's conditional set — which is not
+    // empty: 546 also carries the conditional "Send Ghaz'an up to his platform".
+    for (DungeonEvent const* c : DungeonEventRegistry::Conditional(546))
+        EXPECT_NE(c->id, 1u) << "the drop-down chain must stay Anchored";
 }
 
 // Stratholme (329) dead-side "Baron run": the persistent Slaughterhouse chain
@@ -668,34 +751,50 @@ TEST(DungeonEventRegistryTest, StratholmeSlaughterhouseEventShape)
     EXPECT_TRUE(e->persistent);
     EXPECT_TRUE(e->required);
 
-    ASSERT_EQ(e->steps.size(), 6u);
+    ASSERT_EQ(e->steps.size(), 9u);
 
-    // 1. clear the hall: abominations + the synchronously-summoned Ramstein.
+    // 1. clear the hall of the pre-spawned abominations (bulk).
     EXPECT_EQ(e->steps[0].kind, EventStepKind::ClearRadius);
     EXPECT_TRUE(e->steps[0].engage);
     EXPECT_FLOAT_EQ(e->steps[0].x, 4032.0f);
     EXPECT_FLOAT_EQ(e->steps[0].y, -3415.0f);
 
+    // 1b/1c. actively seek any straggler abomination the centre clear couldn't
+    //    reach (Bile Spewer 10416 / Venom Belcher 10417) — a bot-centred,
+    //    reachability-filtered ClearRadius can leave far ones, and Ramstein spawns
+    //    only when EVERY abomination dies (issue #5).
+    EXPECT_EQ(e->steps[1].kind, EventStepKind::KillCreature);
+    EXPECT_TRUE(e->steps[1].engage);
+    EXPECT_EQ(e->steps[1].creatureEntry, 10416u);
+    EXPECT_EQ(e->steps[2].kind, EventStepKind::KillCreature);
+    EXPECT_TRUE(e->steps[2].engage);
+    EXPECT_EQ(e->steps[2].creatureEntry, 10417u);
+
+    // 1d. all abominations dead -> seek + kill the summoned Ramstein (10439).
+    EXPECT_EQ(e->steps[3].kind, EventStepKind::KillCreature);
+    EXPECT_TRUE(e->steps[3].engage);
+    EXPECT_EQ(e->steps[3].creatureEntry, 10439u);
+
     // 2. wave 1: wait for the mindless undead, then ClearRadius them.
-    EXPECT_EQ(e->steps[1].kind, EventStepKind::WaitForSpawn);
-    EXPECT_EQ(e->steps[1].creatureEntry, 11030u);
-    EXPECT_TRUE(e->steps[1].wantAlive);
-    EXPECT_EQ(e->steps[2].kind, EventStepKind::ClearRadius);
+    EXPECT_EQ(e->steps[4].kind, EventStepKind::WaitForSpawn);
+    EXPECT_EQ(e->steps[4].creatureEntry, 11030u);
+    EXPECT_TRUE(e->steps[4].wantAlive);
+    EXPECT_EQ(e->steps[5].kind, EventStepKind::ClearRadius);
 
     // 3. wave 2: wait for the black guards, then actively seek+kill them
     //    (KillCreatureEngage) — they post far off, so a bot-centred ClearRadius
     //    can't see them.
-    EXPECT_EQ(e->steps[3].kind, EventStepKind::WaitForSpawn);
-    EXPECT_EQ(e->steps[3].creatureEntry, 10394u);
-    EXPECT_EQ(e->steps[4].kind, EventStepKind::KillCreature);
-    EXPECT_EQ(e->steps[4].creatureEntry, 10394u);
+    EXPECT_EQ(e->steps[6].kind, EventStepKind::WaitForSpawn);
+    EXPECT_EQ(e->steps[6].creatureEntry, 10394u);
+    EXPECT_EQ(e->steps[7].kind, EventStepKind::KillCreature);
+    EXPECT_EQ(e->steps[7].creatureEntry, 10394u);
 
     // 4. monotonic completion gate: the Baron door (175796) opens when the guards
     //    die. GO_STATE_ACTIVE (0) = open.
-    EXPECT_EQ(e->steps[5].kind, EventStepKind::WaitForGameObjectState);
-    EXPECT_EQ(e->steps[5].goEntry, 175796u);
-    EXPECT_EQ(e->steps[5].wantState, 0u);
-    EXPECT_GT(e->steps[5].radius, 100.0f);  // reaches the door from across the hall
+    EXPECT_EQ(e->steps[8].kind, EventStepKind::WaitForGameObjectState);
+    EXPECT_EQ(e->steps[8].goEntry, 175796u);
+    EXPECT_EQ(e->steps[8].wantState, 0u);
+    EXPECT_GT(e->steps[8].radius, 100.0f);  // reaches the door from across the hall
 }
 
 // Stratholme (329) live side: Grand Crusader Dathrohan -> Balnazzar (eventId 5),
@@ -731,7 +830,8 @@ TEST(DungeonEventRegistryTest, StratholmeDathrohanBalnazzarEventShape)
 TEST(DungeonEventConditional, StratholmeZigguratAcolyteEvents)
 {
     std::vector<DungeonEvent const*> str = DungeonEventRegistry::Conditional(329);
-    ASSERT_EQ(str.size(), 3u);  // the 3 ziggurats; the Slaughterhouse is anchored
+    // the 3 ziggurats + Timmy's pack pre-clear (id 6); the Slaughterhouse is anchored
+    ASSERT_EQ(str.size(), 4u);
     for (DungeonEvent const* e : str)
     {
         EXPECT_EQ(e->activation, EventActivation::Conditional);
@@ -746,8 +846,7 @@ TEST(DungeonEventConditional, StratholmeZigguratAcolyteEvents)
     {
         DungeonEvent const* e = DungeonEventRegistry::Find(329, id);
         ASSERT_NE(e, nullptr);
-        EXPECT_EQ(e->conditionId, id + 4u);
-        EXPECT_TRUE(EventConditionRegistry::Has(id + 4u));
+        EXPECT_TRUE(static_cast<bool>(e->condition));
     }
 
     // Each acolyte clear sorts in the panel just before the next anchor (so it
@@ -758,6 +857,14 @@ TEST(DungeonEventConditional, StratholmeZigguratAcolyteEvents)
     EXPECT_EQ(DungeonEventRegistry::Find(329, 2)->panelGatesBossEntry, 10438u);
     EXPECT_EQ(DungeonEventRegistry::Find(329, 3)->panelGatesBossEntry,
               BossRosterRegistry::ObjectiveEntry(1));
+
+    // Timmy's pre-clear (id 6) is conditional too and sorts in the panel just
+    // before Timmy himself (10808).
+    DungeonEvent const* timmy = DungeonEventRegistry::Find(329, 6);
+    ASSERT_NE(timmy, nullptr);
+    EXPECT_EQ(timmy->activation, EventActivation::Conditional);
+    EXPECT_TRUE(static_cast<bool>(timmy->condition));
+    EXPECT_EQ(timmy->panelGatesBossEntry, 10808u);
 
     // These are NOT room-aggro pre-clears (ClearRadius, not KillCreature(0)).
     EXPECT_FALSE(DungeonEventRegistry::HasRoomAggroEvent(329));
@@ -770,8 +877,7 @@ TEST(DungeonEventConditional, UldamanIronayaSeal)
     DungeonEvent const* e = DungeonEventRegistry::Find(70, 1);
     ASSERT_NE(e, nullptr);
     EXPECT_EQ(e->activation, EventActivation::Conditional);
-    EXPECT_EQ(e->conditionId, 8u);
-    EXPECT_TRUE(EventConditionRegistry::Has(8u));
+    EXPECT_TRUE(static_cast<bool>(e->condition));
     EXPECT_TRUE(e->required);
     EXPECT_FALSE(e->repeatable);
 
@@ -809,8 +915,7 @@ TEST(DungeonEventConditional, HellfireRampartsApproachVazruden)
     DungeonEvent const* e = DungeonEventRegistry::Find(543, 1);
     ASSERT_NE(e, nullptr);
     EXPECT_EQ(e->activation, EventActivation::Conditional);
-    EXPECT_EQ(e->conditionId, 16u);
-    EXPECT_TRUE(EventConditionRegistry::Has(16u));
+    EXPECT_TRUE(static_cast<bool>(e->condition));
     EXPECT_TRUE(e->repeatable);
     EXPECT_EQ(e->panelGatesBossEntry, 17537u);  // folded under Vazruden
 
@@ -835,8 +940,7 @@ TEST(DungeonEventConditional, BloodFurnaceBroggokCellDoor)
     DungeonEvent const* lever = DungeonEventRegistry::Find(542, 1);
     ASSERT_NE(lever, nullptr);
     EXPECT_EQ(lever->activation, EventActivation::Conditional);
-    EXPECT_EQ(lever->conditionId, 17u);
-    EXPECT_TRUE(EventConditionRegistry::Has(17u));
+    EXPECT_TRUE(static_cast<bool>(lever->condition));
     EXPECT_TRUE(lever->repeatable);
     EXPECT_EQ(lever->panelGatesBossEntry, 17380u);   // folded under Broggok
 
@@ -848,8 +952,7 @@ TEST(DungeonEventConditional, BloodFurnaceBroggokCellDoor)
     DungeonEvent const* hold = DungeonEventRegistry::Find(542, 2);
     ASSERT_NE(hold, nullptr);
     EXPECT_EQ(hold->activation, EventActivation::Conditional);
-    EXPECT_EQ(hold->conditionId, 18u);
-    EXPECT_TRUE(EventConditionRegistry::Has(18u));
+    EXPECT_TRUE(static_cast<bool>(hold->condition));
     EXPECT_TRUE(hold->repeatable);
     EXPECT_EQ(hold->panelGatesBossEntry, 17380u);    // folded under Broggok
 
@@ -875,7 +978,6 @@ TEST(DungeonEventAnchored, UldamanStoneKeepers)
     DungeonEvent const* e = DungeonEventRegistry::Find(70, 2);
     ASSERT_NE(e, nullptr);
     EXPECT_EQ(e->activation, EventActivation::Anchored);
-    EXPECT_FALSE(EventConditionRegistry::Has(9u));       // condition 9 retired
     EXPECT_TRUE(e->required);
     EXPECT_TRUE(e->persistent);
 
@@ -901,7 +1003,6 @@ TEST(DungeonEventAnchored, UldamanArchaedasAltar)
     DungeonEvent const* e = DungeonEventRegistry::Find(70, 3);
     ASSERT_NE(e, nullptr);
     EXPECT_EQ(e->activation, EventActivation::Anchored);
-    EXPECT_FALSE(EventConditionRegistry::Has(10u));      // condition 10 retired
     EXPECT_TRUE(e->required);
 
     ASSERT_EQ(e->steps.size(), 2u);
@@ -977,19 +1078,25 @@ TEST(DungeonEventBuilderTest, SkipIfTargetMissing)
 // Conditional() returns only EventActivation::Conditional events for the map.
 // Sunken Temple (109) is anchored-only (forcefield ring anchors + statues etc.);
 // Shadowfang Keep (33) has the conditional courtyard-door event; ZulFarrak (209)
-// is anchored only.
+// has exactly one conditional (the Zum'rah wake-up) alongside its two anchored.
 TEST(DungeonEventConditional, ConditionalListFiltersByActivation)
 {
     EXPECT_TRUE(DungeonEventRegistry::Conditional(109).empty());  // anchored only
-    EXPECT_TRUE(DungeonEventRegistry::Conditional(209).empty());
 
-    // SFK has two faction-specific conditional events (Alliance + Horde).
+    std::vector<DungeonEvent const*> zf = DungeonEventRegistry::Conditional(209);
+    ASSERT_EQ(zf.size(), 1u);
+    EXPECT_EQ(zf[0]->id, 3u);  // Wake Witch Doctor Zum'rah
+
+    // SFK has the two faction-specific courtyard events (Alliance + Horde) plus
+    // the Sorcerer's Gate voidwalker sweep.
     std::vector<DungeonEvent const*> sfk = DungeonEventRegistry::Conditional(33);
-    ASSERT_EQ(sfk.size(), 2u);
+    ASSERT_EQ(sfk.size(), 3u);
     EXPECT_EQ(sfk[0]->id, 1u);
-    EXPECT_EQ(sfk[0]->conditionId, 1u);  // Alliance
+    EXPECT_TRUE(static_cast<bool>(sfk[0]->condition));  // Alliance
     EXPECT_EQ(sfk[1]->id, 2u);
-    EXPECT_EQ(sfk[1]->conditionId, 2u);  // Horde
+    EXPECT_TRUE(static_cast<bool>(sfk[1]->condition));  // Horde
+    EXPECT_EQ(sfk[2]->id, 3u);
+    EXPECT_TRUE(static_cast<bool>(sfk[2]->condition));  // Arugal's Voidwalkers
     for (DungeonEvent const* e : sfk)
         EXPECT_EQ(e->activation, EventActivation::Conditional);
 }
@@ -1027,6 +1134,62 @@ TEST(DungeonEventConditional, ShadowfangCourtyardEventShape)
     }
 }
 
+// The Sorcerer's Gate (18972) is opened by 'Arugal's Voidwalker - On Just Died -
+// Set GO State', not by the party. The gate wears an empty lock 85, so before
+// this event the door-blocked action rated itself entitled and clicked it open
+// inside the ~6s window between Fenrus dying and Arugal summoning the adds — the
+// party walked out, the voidwalkers spawned behind it, and the run wedged.
+//
+// The shape that fixes it, and why each piece is load-bearing:
+//   - an ARRIVAL step first, anchored on the summon ring, so the party is inside
+//     the adds' 40yd Attack-Start radius when they appear (and so the event
+//     can't false-latch "done" from across the map — the Stratholme #5 lint);
+//   - a WaitForSpawn gate BEFORE the sweep, or the sweep certifies the empty
+//     6s-window room clear and latches having killed nothing;
+//   - the sweep entry-filtered to the voidwalkers, with a by-entry
+//     KillCreatureEngage backstop for anything the position sweep can't see;
+//   - Persistent, because the sweep is a real fight and a combat gap would
+//     otherwise rewind a non-persistent event to step 0;
+//   - Optional, so a wipe that burned the adds' 60s out-of-combat despawn
+//     degrades to the door-blocked pause (which auto-resumes on open) instead
+//     of a hard event stall.
+TEST(DungeonEventConditional, ShadowfangSorcererGateVoidwalkerEventShape)
+{
+    DungeonEvent const* e = DungeonEventRegistry::Find(33, 3);
+    ASSERT_NE(e, nullptr);
+    EXPECT_EQ(e->activation, EventActivation::Conditional);
+    EXPECT_TRUE(static_cast<bool>(e->condition));
+    EXPECT_TRUE(e->persistent);
+    EXPECT_FALSE(e->required);
+
+    ASSERT_EQ(e->steps.size(), 5u);
+
+    // 1. Arrival on the summon ring — never straight to the gate.
+    EXPECT_EQ(e->steps[0].kind, EventStepKind::MoveTo);
+
+    // 2. Wait for the adds to exist before judging the room.
+    EXPECT_EQ(e->steps[1].kind, EventStepKind::WaitForSpawn);
+    EXPECT_EQ(e->steps[1].creatureEntry, 4627u);  // Arugal's Voidwalker
+
+    // 3. Sweep the ring, voidwalkers only.
+    EXPECT_EQ(e->steps[2].kind, EventStepKind::ClearRadius);
+    ASSERT_EQ(e->steps[2].entryFilter.size(), 1u);
+    EXPECT_EQ(e->steps[2].entryFilter[0], 4627u);
+    // The clear verdict is only trusted from within DC_EVENT_CLEAR_JUDGE_RADIUS
+    // (12) of the centre, so the arrival radius must land the tank inside it.
+    EXPECT_LE(e->steps[0].radius, 12.0f);
+
+    // 4. By-entry backstop for anything the position sweep couldn't resolve.
+    EXPECT_EQ(e->steps[3].kind, EventStepKind::KillCreature);
+    EXPECT_TRUE(e->steps[3].engage);
+    EXPECT_EQ(e->steps[3].creatureEntry, 4627u);
+
+    // 5. Confirm the gate the voidwalkers' death opens.
+    EXPECT_EQ(e->steps[4].kind, EventStepKind::WaitForGameObjectState);
+    EXPECT_EQ(e->steps[4].goEntry, 18972u);  // Sorcerer's Gate
+    EXPECT_EQ(e->steps[4].wantState, 0u);    // GO_STATE_ACTIVE (open)
+}
+
 // The synthetic latch key is pure, injective, and lives in a high range that
 // can't collide with real creature/anchor entries.
 TEST(DungeonEventConditional, ConditionalLatchKeyIsHighAndInjective)
@@ -1036,22 +1199,6 @@ TEST(DungeonEventConditional, ConditionalLatchKeyIsHighAndInjective)
     EXPECT_NE(DungeonEventExecutor::ConditionalLatchKey(1),
               DungeonEventExecutor::ConditionalLatchKey(2));
     EXPECT_GT(DungeonEventExecutor::ConditionalLatchKey(1), 1000000u);
-}
-
-// EventConditionRegistry dispatch guards: id 0 and unregistered ids are false;
-// a null bot is false (so a mis-authored event simply never activates); the
-// shipped SFK condition (1) is registered.
-TEST(DungeonEventConditionRegistry, DispatchGuards)
-{
-    EXPECT_FALSE(EventConditionRegistry::Has(0));
-    EXPECT_FALSE(EventConditionRegistry::Has(9999));
-    EXPECT_TRUE(EventConditionRegistry::Has(1));   // SFK Alliance
-    EXPECT_TRUE(EventConditionRegistry::Has(2));   // SFK Horde
-    EXPECT_TRUE(EventConditionRegistry::Has(3));   // room-aggro pre-clear (M3)
-
-    EXPECT_FALSE(EventConditionRegistry::Evaluate(0, nullptr, nullptr));
-    EXPECT_FALSE(EventConditionRegistry::Evaluate(9999, nullptr, nullptr));
-    EXPECT_FALSE(EventConditionRegistry::Evaluate(1, nullptr, nullptr));  // null bot
 }
 
 // --- Milestone 3: room-aggro pre-clear -----------------------------------
@@ -1064,7 +1211,7 @@ TEST(DungeonEventRoomAggro, ScarletCathedralEventShape)
     DungeonEvent const* e = DungeonEventRegistry::Find(189, 1);
     ASSERT_NE(e, nullptr);
     EXPECT_EQ(e->activation, EventActivation::Conditional);
-    EXPECT_EQ(e->conditionId, 3u);
+    EXPECT_TRUE(static_cast<bool>(e->condition));
     EXPECT_TRUE(e->required);
     ASSERT_EQ(e->steps.size(), 1u);
     EXPECT_EQ(e->steps[0].kind, EventStepKind::KillCreature);
@@ -1078,7 +1225,7 @@ TEST(DungeonEventRoomAggro, ScholomanceMardukVectusEventShape)
     DungeonEvent const* e = DungeonEventRegistry::Find(289, 1);
     ASSERT_NE(e, nullptr);
     EXPECT_EQ(e->activation, EventActivation::Conditional);
-    EXPECT_EQ(e->conditionId, 3u);
+    EXPECT_TRUE(static_cast<bool>(e->condition));
     EXPECT_TRUE(e->required);
     ASSERT_EQ(e->steps.size(), 1u);
     EXPECT_EQ(e->steps[0].kind, EventStepKind::KillCreature);
@@ -1176,13 +1323,13 @@ TEST(DungeonEventAnchored, DireMaulWestEntranceSweepShape)
 // ignores the lock, so no Crescent Key is needed.
 TEST(DungeonEventConditional, DireMaulWestCrescentDoorEventShape)
 {
-    struct Door { uint32 eventId; uint32 conditionId; uint32 goEntry; };
-    for (Door const& d : { Door{9, 14, 177221}, Door{10, 15, 179550} })
+    struct Door { uint32 eventId; uint32 goEntry; };
+    for (Door const& d : { Door{9, 177221}, Door{10, 179550} })
     {
         DungeonEvent const* e = DungeonEventRegistry::Find(429, d.eventId);
         ASSERT_NE(e, nullptr) << "missing crescent door event " << d.eventId;
         EXPECT_EQ(e->activation, EventActivation::Conditional);
-        EXPECT_EQ(e->conditionId, d.conditionId);
+        EXPECT_TRUE(static_cast<bool>(e->condition));
         EXPECT_FALSE(e->required);  // Optional
         ASSERT_EQ(e->steps.size(), 2u);
         EXPECT_EQ(e->steps[0].kind, EventStepKind::UseGameObject);
@@ -1191,7 +1338,6 @@ TEST(DungeonEventConditional, DireMaulWestCrescentDoorEventShape)
         EXPECT_EQ(e->steps[1].goEntry, d.goEntry);
         EXPECT_EQ(e->steps[1].wantState, 0u);  // GO_STATE_ACTIVE (open)
 
-        EXPECT_TRUE(EventConditionRegistry::Has(d.conditionId));
     }
 }
 
@@ -1218,4 +1364,27 @@ TEST(DungeonEventRegistryTest, WailingCavernsDiscipleEscort)
     EXPECT_EQ(esc.gossipOption, 0);        // "Let the event begin!"
     EXPECT_EQ(esc.escortDoneEntry, 3654u); // Mutanus the Devourer
     EXPECT_EQ(esc.escortDoneBit, 7);       // his DungeonEncounter bit
+}
+
+// ZulFarrak Zum'rah wake-up (map 209, id 3). He spawns FRIENDLY (faction 35) and
+// only turns hostile when someone crosses area trigger 962 — a client packet no
+// bot sends for a non-teleport trigger, so an all-bot party deadlocks on a live
+// but unattackable boss. CONDITIONAL (his state, not a travel anchor, decides) +
+// REPEATABLE (a wipe restores faction 35, and a one-shot latch would leave the
+// retry deadlocked). A single Custom step (hook 5) sets the faction the trigger's
+// SmartAI row would have set; forging the packet was tried first and did not work
+// live, so no MoveTo-onto-the-trigger step remains.
+TEST(DungeonEventConditional, ZulFarrakZumrahWakeEventShape)
+{
+    DungeonEvent const* e = DungeonEventRegistry::Find(209, 3);
+    ASSERT_NE(e, nullptr);
+    EXPECT_EQ(e->activation, EventActivation::Conditional);
+    EXPECT_TRUE(static_cast<bool>(e->condition));
+    EXPECT_TRUE(e->repeatable);
+    EXPECT_EQ(e->panelGatesBossEntry, 7271u);  // folds under Zum'rah in the panel
+
+    ASSERT_EQ(e->steps.size(), 1u);
+    EXPECT_EQ(e->steps[0].kind, EventStepKind::Custom);
+    EXPECT_EQ(e->steps[0].hookId, 5u);
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(e->steps[0].hookId));
 }

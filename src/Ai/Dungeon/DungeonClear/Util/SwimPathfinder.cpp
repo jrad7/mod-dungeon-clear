@@ -13,6 +13,7 @@
 #include "Map.h"
 #include "ModelIgnoreFlags.h"
 #include "Player.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"  // DC_PI
 
 namespace
 {
@@ -29,7 +30,7 @@ namespace
     constexpr float YAW_FAN[]   = { 0.0f, 20.0f, -20.0f, 40.0f, -40.0f, 60.0f, -60.0f, 85.0f, -85.0f, 110.0f, -110.0f };
     constexpr float PITCH_FAN[] = { 0.0f, 20.0f, -20.0f, 40.0f, -40.0f, 60.0f, -60.0f };
 
-    constexpr float DEG2RAD = float(M_PI) / 180.0f;
+    constexpr float DEG2RAD = DC_PI / 180.0f;
 
     float Dist3D(G3D::Vector3 const& a, G3D::Vector3 const& b)
     {
@@ -58,7 +59,7 @@ namespace
     {
         float const a = az + yawDeg * DEG2RAD;
         float e = el + pitchDeg * DEG2RAD;
-        float const lim = float(M_PI) * 0.5f - 0.01f;
+        float const lim = DC_PI * 0.5f - 0.01f;
         if (e > lim) e = lim;
         if (e < -lim) e = -lim;
         float const ce = std::cos(e);

@@ -17,77 +17,46 @@
 #include "Value.h"
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 #include "Ai/Dungeon/DungeonClear/DcPullContext.h"
+#include "Ai/Dungeon/DungeonClear/DcRunState.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
 
-class DungeonClearEnabledValue : public ManualSetValue<bool>
+// The leader-owned run-level state — enabled flag, pause cluster (paused flag +
+// reason phrase + auto-paused door), the manual selected-boss override, and the
+// two cross-bot leader-fight latches — consolidated into one owned struct
+// (DcRunState, see DcRunState.h) so the whole run resets in lockstep through
+// exactly one Reset() (and OnResume() for the pause cluster). This replaced five
+// loose ManualSetValue globals ("dungeon clear enabled / paused / pause reason /
+// paused door / selected boss") plus the two file-static latch maps
+// (g_leaderCombatSince / g_partyEngagedLatch, each with its own mutex) whose
+// resets were hand-replicated across DisableDungeonClear and the DcOn/Off/Skip/
+// Go/Resume clusters — the "stale latch survives pause/skip/resume" bug class.
+// Leader-owned; followers read `enabled`/`paused` cross-context via the leader's
+// copy (DcLeaderSignal). Access through DcRun::Of (Util/DcRun.h). Reset on
+// dc on / dc off / death / cleared; OnResume on pause resume + dc on.
+class DungeonClearRunStateValue : public ManualSetValue<DcRunState&>
 {
 public:
-    DungeonClearEnabledValue(PlayerbotAI* botAI) : ManualSetValue<bool>(botAI, false, "dungeon clear enabled") {}
-};
-
-// Pause flag layered on top of `dungeon clear enabled`. When true, every
-// driving gate (the trigger ladder's IsEnabled, the multiplier, the
-// follow-tank party-tank lookup, the blocking-door scan) goes inert so the
-// tank behaves exactly as it does under `dc off` — it stops navigating,
-// releases its followers, and lets stock wandering resume. Unlike `dc off`,
-// `enabled` and all progress state (selected boss, skipped set, sticky boss)
-// are preserved, so toggling pause back off resumes on the same boss. Always
-// reset to false alongside `enabled` (dc on / dc off / death / cleared) so a
-// fresh run can never start paused.
-class DungeonClearPausedValue : public ManualSetValue<bool>
-{
-public:
-    DungeonClearPausedValue(PlayerbotAI* botAI) : ManualSetValue<bool>(botAI, false, "dungeon clear paused") {}
-};
-
-// Short human phrase describing WHY the run is paused, so the status panel can
-// tell the player whether they paused it themselves or whether the tank
-// auto-paused on a door it can't open. Set at each of the two pause sites
-// (DcPauseAction for a manual pause, DungeonClearDoorBlockedAction for the
-// door auto-pause) the moment `dungeon clear paused` flips true; read by
-// BuildStatusPayload only while paused. Cleared alongside the paused flag on
-// resume / dc on / dc off / death / cleared so a stale reason can't leak into
-// the next pause. Empty falls back to a generic "holding position".
-class DungeonClearPauseReasonValue : public ManualSetValue<std::string&>
-{
-public:
-    DungeonClearPauseReasonValue(PlayerbotAI* botAI)
-        : ManualSetValue<std::string&>(botAI, data, "dungeon clear pause reason")
+    DungeonClearRunStateValue(PlayerbotAI* botAI)
+        : ManualSetValue<DcRunState&>(botAI, data, DcKey::RunState)
     {
     }
+
+    void Reset() override { data.Reset(); }
 
 private:
-    std::string data;
-};
-
-// GUID of the closed door the tank auto-paused in front of (see
-// DungeonClearDoorBlockedAction's can't-open branch). Empty unless the run is
-// paused specifically for an unopenable door. While it is set,
-// DungeonClearDoorReopenedTrigger polls this one door every tick; the moment it
-// reads OPEN — a human walked up and opened it — or it despawns/unresolves, the
-// trigger auto-resumes the clear so the player doesn't ALSO have to hit Resume.
-// Stamped ONLY by the door auto-pause site: a manual `dc pause` deliberately
-// leaves it empty so opening some unrelated door can never auto-resume a
-// hand-held pause. Cleared alongside the paused flag on resume / dc on / dc off
-// / death / cleared so a stale door can't trigger a phantom resume next pause.
-class DungeonClearPausedDoorValue : public ManualSetValue<ObjectGuid>
-{
-public:
-    DungeonClearPausedDoorValue(PlayerbotAI* botAI)
-        : ManualSetValue<ObjectGuid>(botAI, ObjectGuid::Empty, "dungeon clear paused door")
-    {
-    }
+    DcRunState data;
 };
 
 class DungeonClearSkippedValue : public ManualSetValue<std::unordered_set<uint32>&>
 {
 public:
     DungeonClearSkippedValue(PlayerbotAI* botAI)
-        : ManualSetValue<std::unordered_set<uint32>&>(botAI, data, "dungeon clear skipped")
+        : ManualSetValue<std::unordered_set<uint32>&>(botAI, data, DcKey::Skipped)
     {
     }
 
@@ -106,7 +75,7 @@ class DungeonClearClearedAnchorsValue : public ManualSetValue<std::unordered_set
 {
 public:
     DungeonClearClearedAnchorsValue(PlayerbotAI* botAI)
-        : ManualSetValue<std::unordered_set<uint32>&>(botAI, data, "dungeon clear cleared anchors")
+        : ManualSetValue<std::unordered_set<uint32>&>(botAI, data, DcKey::ClearedAnchors)
     {
     }
 
@@ -128,7 +97,7 @@ class DungeonClearSeenBossesValue : public ManualSetValue<std::unordered_set<uin
 {
 public:
     DungeonClearSeenBossesValue(PlayerbotAI* botAI)
-        : ManualSetValue<std::unordered_set<uint32>&>(botAI, data, "dungeon clear seen bosses")
+        : ManualSetValue<std::unordered_set<uint32>&>(botAI, data, DcKey::SeenBosses)
     {
     }
 
@@ -153,7 +122,7 @@ class DungeonClearSeenDueEventsValue : public ManualSetValue<std::unordered_set<
 {
 public:
     DungeonClearSeenDueEventsValue(PlayerbotAI* botAI)
-        : ManualSetValue<std::unordered_set<uint32>&>(botAI, data, "dungeon clear seen due events")
+        : ManualSetValue<std::unordered_set<uint32>&>(botAI, data, DcKey::SeenDueEvents)
     {
     }
 
@@ -167,7 +136,7 @@ class DungeonClearStallReasonValue : public ManualSetValue<std::string&>
 {
 public:
     DungeonClearStallReasonValue(PlayerbotAI* botAI)
-        : ManualSetValue<std::string&>(botAI, data, "dungeon clear stall reason")
+        : ManualSetValue<std::string&>(botAI, data, DcKey::StallReason)
     {
     }
 
@@ -179,7 +148,7 @@ class DungeonClearLastSaidReasonValue : public ManualSetValue<std::string&>
 {
 public:
     DungeonClearLastSaidReasonValue(PlayerbotAI* botAI)
-        : ManualSetValue<std::string&>(botAI, data, "dungeon clear last said reason")
+        : ManualSetValue<std::string&>(botAI, data, DcKey::LastSaidReason)
     {
     }
 
@@ -201,7 +170,7 @@ class DungeonClearPhaseValue : public ManualSetValue<std::string&>
 {
 public:
     DungeonClearPhaseValue(PlayerbotAI* botAI)
-        : ManualSetValue<std::string&>(botAI, data, "dungeon clear phase")
+        : ManualSetValue<std::string&>(botAI, data, DcKey::Phase)
     {
     }
 
@@ -213,7 +182,7 @@ class DungeonClearFallbackTargetValue : public ManualSetValue<ObjectGuid>
 {
 public:
     DungeonClearFallbackTargetValue(PlayerbotAI* botAI)
-        : ManualSetValue<ObjectGuid>(botAI, ObjectGuid::Empty, "dungeon clear fallback target")
+        : ManualSetValue<ObjectGuid>(botAI, ObjectGuid::Empty, DcKey::FallbackTarget)
     {
     }
 };
@@ -229,7 +198,7 @@ class DungeonClearEngageTrashTargetValue : public ManualSetValue<ObjectGuid>
 {
 public:
     DungeonClearEngageTrashTargetValue(PlayerbotAI* botAI)
-        : ManualSetValue<ObjectGuid>(botAI, ObjectGuid::Empty, "dungeon clear engage trash target")
+        : ManualSetValue<ObjectGuid>(botAI, ObjectGuid::Empty, DcKey::EngageTrashTarget)
     {
     }
 };
@@ -249,7 +218,7 @@ class DungeonClearFollowedTankValue : public ManualSetValue<ObjectGuid>
 {
 public:
     DungeonClearFollowedTankValue(PlayerbotAI* botAI)
-        : ManualSetValue<ObjectGuid>(botAI, ObjectGuid::Empty, "dungeon clear followed tank")
+        : ManualSetValue<ObjectGuid>(botAI, ObjectGuid::Empty, DcKey::FollowedTank)
     {
     }
 };
@@ -268,21 +237,13 @@ class DungeonClearStickyBossValue : public ManualSetValue<uint32>
 {
 public:
     DungeonClearStickyBossValue(PlayerbotAI* botAI)
-        : ManualSetValue<uint32>(botAI, 0u, "dungeon clear sticky boss")
+        : ManualSetValue<uint32>(botAI, 0u, DcKey::StickyBoss)
     {
     }
 };
 
-// Boss entry representing a manually selected boss override.
-// 0 means no override active; normal automatic progression runs.
-class DungeonClearSelectedBossValue : public ManualSetValue<uint32>
-{
-public:
-    DungeonClearSelectedBossValue(PlayerbotAI* botAI)
-        : ManualSetValue<uint32>(botAI, 0u, "dungeon clear selected boss")
-    {
-    }
-};
+// The manual selected-boss override (was DungeonClearSelectedBossValue, "dungeon
+// clear selected boss") is now DcRunState::selectedBossEntry — see DcRunState.h.
 
 // The dynamic instance id the run-scoped completion state currently belongs to.
 // The cleared-anchors / skipped / commit sets live in the bot's context, not the
@@ -294,7 +255,7 @@ class DungeonClearRunInstanceValue : public ManualSetValue<uint32>
 {
 public:
     DungeonClearRunInstanceValue(PlayerbotAI* botAI)
-        : ManualSetValue<uint32>(botAI, 0u, "dungeon clear run instance")
+        : ManualSetValue<uint32>(botAI, 0u, DcKey::RunInstance)
     {
     }
 };
@@ -315,7 +276,7 @@ class DungeonClearCurrentHopValue : public ManualSetValue<uint32>
 {
 public:
     DungeonClearCurrentHopValue(PlayerbotAI* botAI)
-        : ManualSetValue<uint32>(botAI, 0u, "dungeon clear current hop")
+        : ManualSetValue<uint32>(botAI, 0u, DcKey::CurrentHop)
     {
     }
 };
@@ -350,7 +311,7 @@ class DungeonClearLootSkipValue : public ManualSetValue<std::map<ObjectGuid, uin
 {
 public:
     DungeonClearLootSkipValue(PlayerbotAI* botAI)
-        : ManualSetValue<std::map<ObjectGuid, uint32>&>(botAI, data, "dungeon clear loot skip")
+        : ManualSetValue<std::map<ObjectGuid, uint32>&>(botAI, data, DcKey::LootSkip)
     {
     }
 
@@ -375,7 +336,7 @@ class DungeonClearLootCampGuidValue : public ManualSetValue<ObjectGuid>
 {
 public:
     DungeonClearLootCampGuidValue(PlayerbotAI* botAI)
-        : ManualSetValue<ObjectGuid>(botAI, ObjectGuid::Empty, "dungeon clear loot camp guid")
+        : ManualSetValue<ObjectGuid>(botAI, ObjectGuid::Empty, DcKey::LootCampGuid)
     {
     }
 };
@@ -384,7 +345,7 @@ class DungeonClearLootCampStartValue : public ManualSetValue<uint32>
 {
 public:
     DungeonClearLootCampStartValue(PlayerbotAI* botAI)
-        : ManualSetValue<uint32>(botAI, 0u, "dungeon clear loot camp start")
+        : ManualSetValue<uint32>(botAI, 0u, DcKey::LootCampStart)
     {
     }
 };
@@ -401,7 +362,7 @@ class DungeonClearPullModeValue : public ManualSetValue<bool>
 {
 public:
     DungeonClearPullModeValue(PlayerbotAI* botAI)
-        : ManualSetValue<bool>(botAI, false, "dungeon clear pull mode")
+        : ManualSetValue<bool>(botAI, false, DcKey::PullMode)
     {
     }
 };
@@ -422,7 +383,7 @@ class DungeonClearPullSettingValue : public ManualSetValue<uint32>
 {
 public:
     DungeonClearPullSettingValue(PlayerbotAI* botAI)
-        : ManualSetValue<uint32>(botAI, 2u, "dungeon clear pull setting")
+        : ManualSetValue<uint32>(botAI, 2u, DcKey::PullSetting)
     {
     }
 };
@@ -444,7 +405,7 @@ class DungeonClearPullContextValue : public ManualSetValue<DcPullContext&>
 {
 public:
     DungeonClearPullContextValue(PlayerbotAI* botAI)
-        : ManualSetValue<DcPullContext&>(botAI, data, "dungeon clear pull context")
+        : ManualSetValue<DcPullContext&>(botAI, data, DcKey::PullContext)
     {
     }
 
@@ -475,8 +436,11 @@ struct DungeonClearSwimState
     uint32 cursor{0};
     uint32 targetEntry{0};        // boss entry the leg was built toward (0 = none)
     G3D::Vector3 buildStart;
-    uint32 lastProgressMs{0};
-    float lastDistToPoint{0.0f};
+    // Closing-distance wedge detector for the leg (nav review F11): tracks the
+    // nearest approach to the current swim point + the wall-clock of the last
+    // gain, so a leg making no headway underwater is abandoned. Was the inline
+    // lastProgressMs/lastDistToPoint pair.
+    DcProgressWatchdog progressWatch;
 
     void Reset()
     {
@@ -485,8 +449,7 @@ struct DungeonClearSwimState
         cursor = 0;
         targetEntry = 0;
         buildStart = G3D::Vector3();
-        lastProgressMs = 0;
-        lastDistToPoint = 0.0f;
+        progressWatch.Reset();
     }
 };
 
@@ -494,7 +457,7 @@ class DungeonClearSwimStateValue : public ManualSetValue<DungeonClearSwimState&>
 {
 public:
     DungeonClearSwimStateValue(PlayerbotAI* botAI)
-        : ManualSetValue<DungeonClearSwimState&>(botAI, data, "dungeon clear swim state")
+        : ManualSetValue<DungeonClearSwimState&>(botAI, data, DcKey::SwimState)
     {
     }
 
@@ -512,7 +475,7 @@ class DungeonClearFollowerStateValue : public ManualSetValue<DungeonFollowerStat
 {
 public:
     DungeonClearFollowerStateValue(PlayerbotAI* botAI)
-        : ManualSetValue<DungeonFollowerState&>(botAI, data, "dungeon clear follower state")
+        : ManualSetValue<DungeonFollowerState&>(botAI, data, DcKey::FollowerState)
     {
     }
 
@@ -535,7 +498,7 @@ class DungeonEventProgressValue : public ManualSetValue<DungeonEventProgress&>
 {
 public:
     DungeonEventProgressValue(PlayerbotAI* botAI)
-        : ManualSetValue<DungeonEventProgress&>(botAI, data, "dungeon clear event progress")
+        : ManualSetValue<DungeonEventProgress&>(botAI, data, DcKey::EventProgress)
     {
     }
 
@@ -556,7 +519,7 @@ class DungeonConditionalEventProgressValue : public ManualSetValue<DungeonEventP
 {
 public:
     DungeonConditionalEventProgressValue(PlayerbotAI* botAI)
-        : ManualSetValue<DungeonEventProgress&>(botAI, data, "dungeon clear conditional event progress")
+        : ManualSetValue<DungeonEventProgress&>(botAI, data, DcKey::ConditionalEventProgress)
     {
     }
 
@@ -576,7 +539,7 @@ class DungeonClearApproachStateValue : public ManualSetValue<DcApproachState&>
 {
 public:
     DungeonClearApproachStateValue(PlayerbotAI* botAI)
-        : ManualSetValue<DcApproachState&>(botAI, data, "dungeon clear approach state")
+        : ManualSetValue<DcApproachState&>(botAI, data, DcKey::ApproachState)
     {
     }
 
@@ -595,7 +558,7 @@ class DungeonClearTickMemoValue : public ManualSetValue<DcTickMemo&>
 {
 public:
     DungeonClearTickMemoValue(PlayerbotAI* botAI)
-        : ManualSetValue<DcTickMemo&>(botAI, data, "dungeon clear tick memo")
+        : ManualSetValue<DcTickMemo&>(botAI, data, DcKey::TickMemo)
     {
     }
 

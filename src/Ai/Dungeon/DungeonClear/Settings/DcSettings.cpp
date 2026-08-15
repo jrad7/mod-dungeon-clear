@@ -13,7 +13,10 @@
 #include <unordered_map>
 
 #include "Config.h"
+#include "DBCEnums.h"
 #include "Log.h"
+#include "Map.h"
+#include "ObjectAccessor.h"
 #include "Player.h"
 
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
@@ -31,6 +34,13 @@ namespace
     std::string FullKey(char const* keySuffix)
     {
         return std::string("DungeonClear.") + keySuffix;
+    }
+
+    // The heroic sibling of a conf key: "DungeonClear.<Key>.Heroic". Read only
+    // while the run is at DUNGEON_DIFFICULTY_HEROIC.
+    std::string FullKeyHeroic(char const* keySuffix)
+    {
+        return FullKey(keySuffix) + ".Heroic";
     }
 
     // Read one registry key straight from conf (uncached), as a double.
@@ -76,22 +86,84 @@ namespace
     // (the map-update pool, the centering workers, the path worker) just load,
     // with no per-read locking once the table is warm.
     std::array<std::atomic<double>, kDcSettingCount> g_confCache;
+    // The HEROIC-difficulty twin of g_confCache, holding each key's fully-folded
+    // heroic value: the "<Key>.Heroic" conf line if the admin wrote one, else the
+    // registry's authored heroicVal, else the row's ordinary conf/default value.
+    // Folding the whole chain once at warm time is what keeps the per-read cost
+    // identical to the normal path — a heroic read is one atomic load, exactly
+    // like a normal one, with no extra branching on which layer supplied it.
+    std::array<std::atomic<double>, kDcSettingCount> g_confCacheHeroic;
+    // Does this row have a heroic layer AT ALL (conf line or registry value)?
+    // Rows without one skip the difficulty lookup entirely, so the map/instance
+    // read is paid only by the handful of keys that can actually differ.
+    std::array<std::atomic<bool>, kDcSettingCount> g_heroicLayer;
     std::atomic<bool> g_confCacheReady{false};
     std::mutex g_confCacheLoadMutex;
 
-    // Resolve every key from conf into g_confCache (relaxed stores; an individual
-    // slot's load can never tear, and the keys are independent so a reader seeing
-    // a half-applied reload for one tick is harmless). Caller holds the load mutex
-    // OR runs at a point where no reader races (config load on the world thread).
+    // Resolve the heroic layer for one row, given its already-resolved normal
+    // value. Presence of the "<Key>.Heroic" conf line is detected by reading it
+    // as a STRING (an absent line comes back as the empty default): the typed
+    // readers can only return "the default", which is indistinguishable from an
+    // admin who explicitly wrote the default. Costs two reads, but only at warm
+    // time — never per tick. Returns false when the row has no heroic layer, in
+    // which case `out` is left as the normal value.
+    bool ResolveHeroic(DcSettingDef const& d, double normalValue, double& out)
+    {
+        out = normalValue;
+        std::string const full = FullKeyHeroic(d.key);
+        if (!sConfigMgr->GetOption<std::string>(full, "", false).empty())
+        {
+            switch (d.type)
+            {
+                case DcType::Bool:
+                    out = sConfigMgr->GetOption<bool>(full, false, false) ? 1.0 : 0.0;
+                    break;
+                case DcType::UInt:
+                    out = static_cast<double>(sConfigMgr->GetOption<uint32>(full, 0, false));
+                    break;
+                case DcType::Int:
+                    out = static_cast<double>(sConfigMgr->GetOption<int32>(full, 0, false));
+                    break;
+                case DcType::Float:
+                default:
+                    out = static_cast<double>(sConfigMgr->GetOption<float>(full, 0.0f, false));
+                    break;
+            }
+            return true;
+        }
+        if (DcHasHeroicDefault(d))
+        {
+            out = d.heroicVal;
+            return true;
+        }
+        return false;
+    }
+
+    // Resolve every key from conf into g_confCache and its heroic twin (relaxed
+    // stores; an individual slot's load can never tear, and the keys are
+    // independent so a reader seeing a half-applied reload for one tick is
+    // harmless). Caller holds the load mutex OR runs at a point where no reader
+    // races (config load on the world thread).
     void PopulateConfCache()
     {
         for (std::size_t i = 0; i < kDcSettingCount; ++i)
-            g_confCache[i].store(ConfValueUncached(kDcSettings[i]), std::memory_order_relaxed);
+        {
+            double const normal = ConfValueUncached(kDcSettings[i]);
+            g_confCache[i].store(normal, std::memory_order_relaxed);
+
+            double heroic = normal;
+            bool const layered = ResolveHeroic(kDcSettings[i], normal, heroic);
+            g_confCacheHeroic[i].store(heroic, std::memory_order_relaxed);
+            g_heroicLayer[i].store(layered, std::memory_order_relaxed);
+        }
         g_confCacheReady.store(true, std::memory_order_release);
     }
 
-    // conf -> registry default, returned as a double regardless of type, cached.
-    double ConfValue(DcSettingDef const& d)
+    // Cache slot for a row, or kDcSettingCount when the row is not in the table
+    // (every caller passes a row from FindDcSetting / kDcSettings, so this is
+    // purely defensive — an unknown row reads uncached rather than risking an
+    // out-of-range slot). Warms the table on first use.
+    std::size_t CacheSlot(DcSettingDef const& d)
     {
         // First read of the server's life warms the whole table under a one-shot
         // lock; every read after the release-store sees ready and skips the lock.
@@ -102,18 +174,60 @@ namespace
                 PopulateConfCache();
         }
 
-        // d always points into kDcSettings (every caller passes a row from
-        // FindDcSetting / kDcSettings). Guard the index defensively; an unknown
-        // row just reads uncached rather than risking an out-of-range cache slot.
         std::ptrdiff_t const off = &d - &kDcSettings[0];
         if (off < 0 || static_cast<std::size_t>(off) >= kDcSettingCount)
-            return ConfValueUncached(d);
-
-        return g_confCache[static_cast<std::size_t>(off)].load(std::memory_order_relaxed);
+            return kDcSettingCount;
+        return static_cast<std::size_t>(off);
     }
 
-    // The full resolution chain for one registry entry.
-    double GetRaw(ObjectGuid owner, DcSettingDef const& d)
+    // conf -> registry default, returned as a double regardless of type, cached.
+    // `heroic` picks the folded heroic twin (identical to the normal value for
+    // any row without a heroic layer, so the flag is safe to pass blindly).
+    double ConfValue(DcSettingDef const& d, bool heroic)
+    {
+        std::size_t const slot = CacheSlot(d);
+        if (slot == kDcSettingCount)
+            return ConfValueUncached(d);
+        return heroic ? g_confCacheHeroic[slot].load(std::memory_order_relaxed)
+                      : g_confCache[slot].load(std::memory_order_relaxed);
+    }
+
+    // Does this row have a heroic layer at all? Rows that don't (nearly all of
+    // them) never pay for the difficulty lookup below.
+    bool HasHeroicLayer(DcSettingDef const& d)
+    {
+        std::size_t const slot = CacheSlot(d);
+        if (slot == kDcSettingCount)
+            return false;
+        return g_heroicLayer[slot].load(std::memory_order_relaxed);
+    }
+
+    // Is the run this read belongs to running at heroic difficulty?
+    //
+    // `mapCtx` is the bot the read came through when there was one — the hot
+    // path, since almost every call site is DcSettings::GetX(bot, key) — and
+    // reading the difficulty off its own map costs nothing. The GUID-only path
+    // (the addon sync payload and `.dc config`, both once-per-request, never
+    // per tick) falls back to resolving the leader; server-only keys pass an
+    // empty owner and never reach here at all.
+    bool IsHeroicRun(ObjectGuid owner, Player* mapCtx)
+    {
+        Player* p = mapCtx;
+        if (!p && !owner.IsEmpty())
+            p = ObjectAccessor::FindPlayer(owner);
+        Map* map = p ? p->FindMap() : nullptr;
+        return map && map->IsDungeon() && map->GetDifficulty() == DUNGEON_DIFFICULTY_HEROIC;
+    }
+
+    // The full resolution chain for one registry entry:
+    //
+    //   per-run override -> conf "<Key>.Heroic" -> registry heroicVal
+    //                    -> conf "<Key>"        -> registry defVal
+    //
+    // The override is deliberately difficulty-BLIND and sits above the heroic
+    // layer: a human who typed a value for this run means it for this run, and a
+    // default — however well chosen — must never overrule an explicit one.
+    double GetRaw(ObjectGuid owner, DcSettingDef const& d, Player* mapCtx = nullptr)
     {
         if (d.playerFacing && !owner.IsEmpty())
         {
@@ -125,7 +239,8 @@ namespace
                     return keyIt->second;  // already clamped at SetOverride time
             }
         }
-        return ConfValue(d);
+        bool const heroic = HasHeroicLayer(d) && IsHeroicRun(owner, mapCtx);
+        return ConfValue(d, heroic);
     }
 
     // Resolve the run owner from any bot in the run. Skipped (Empty) for
@@ -170,31 +285,34 @@ namespace DcSettings
         return sConfigMgr->GetOption<float>(FullKey(key), 0.0f);
     }
 
+    // The bot is passed through as the map context so the difficulty comes off
+    // the caller's own map — no owner lookup, no ObjectAccessor, on the path that
+    // runs every tick.
     bool GetBool(Player* bot, char const* key)
     {
         if (DcSettingDef const* d = FindDcSetting(key))
-            return GetRaw(OwnerForBot(bot, *d), *d) != 0.0;
+            return GetRaw(OwnerForBot(bot, *d), *d, bot) != 0.0;
         return sConfigMgr->GetOption<bool>(FullKey(key), false);
     }
 
     int32 GetInt(Player* bot, char const* key)
     {
         if (DcSettingDef const* d = FindDcSetting(key))
-            return static_cast<int32>(std::lround(GetRaw(OwnerForBot(bot, *d), *d)));
+            return static_cast<int32>(std::lround(GetRaw(OwnerForBot(bot, *d), *d, bot)));
         return sConfigMgr->GetOption<int32>(FullKey(key), 0);
     }
 
     uint32 GetUInt(Player* bot, char const* key)
     {
         if (DcSettingDef const* d = FindDcSetting(key))
-            return static_cast<uint32>(std::lround(GetRaw(OwnerForBot(bot, *d), *d)));
+            return static_cast<uint32>(std::lround(GetRaw(OwnerForBot(bot, *d), *d, bot)));
         return sConfigMgr->GetOption<uint32>(FullKey(key), 0);
     }
 
     float GetFloat(Player* bot, char const* key)
     {
         if (DcSettingDef const* d = FindDcSetting(key))
-            return static_cast<float>(GetRaw(OwnerForBot(bot, *d), *d));
+            return static_cast<float>(GetRaw(OwnerForBot(bot, *d), *d, bot));
         return sConfigMgr->GetOption<float>(FullKey(key), 0.0f);
     }
 

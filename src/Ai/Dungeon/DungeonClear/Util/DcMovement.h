@@ -59,6 +59,21 @@ namespace DcMovement
     // Stop the bot at the requested strength.
     void StopBot(Player* bot, Stop strength);
 
+    // Drop the "I am still travelling" wait recorded by the last movement, WITHOUT
+    // stopping the bot or touching any generator.
+    //
+    // MovementAction::MoveTo records a LastMovement delay sized to the leg's travel
+    // time, and MovementAction::IsWaitingForLastMove refuses any later move whose
+    // priority is not STRICTLY GREATER than the recorded one. Everything the pull
+    // issues is MOVEMENT_COMBAT, so one leg's leftover wait silently refuses the
+    // NEXT leg for the remainder of its budget — the tank stands in the pack it
+    // just aggroed instead of turning and running home. Stop::Hold / Stop::HardPin
+    // already zero it as a side effect, but they also stop the bot, and Hold
+    // early-outs on a bot that is standing still, which is exactly the case that
+    // needs clearing. This is the seam for "I am replacing the leg, not halting
+    // it": call it immediately before issuing the replacement move.
+    void ClearMovementWait(Player* bot);
+
     // Issue the upcoming polyline as ONE EscortMovementGenerator spline (the
     // continuous glide that replaces per-point stops). Absorbs the issuance
     // ritual that was hand-duplicated at the advance, swim, and pull-maneuver

@@ -6,10 +6,15 @@
 #include "DcEngageGeometry.h"
 
 #include "DcDoorIndex.h"
+#include "DcHazard.h"
 #include "DungeonClearUtil.h"   // DcTargeting::GetLiveBoss (until DcTargeting moves)
 #include "DungeonClearMath.h"
 #include "DungeonClearTuning.h"
+#include "Ai/Dungeon/DungeonClear/Data/BossPullbackRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/RouteSweepRegistry.h"
+#include "Ai/Dungeon/DungeonClear/DcApproachState.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include <algorithm>
 #include <cmath>
@@ -27,7 +32,6 @@
 #include <vector>
 #include "AttackersValue.h"
 #include "CellImpl.h"
-#include "Config.h"
 #include "Creature.h"
 #include "CreatureGroups.h"
 #include "GameObject.h"
@@ -64,6 +68,26 @@
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLiveBossValue.h"
 
+float DcEngageGeometry::AggroReachYards(float aggroRange, float mobReach,
+                                        float botReach, float aggroMargin,
+                                        float partyBuffer)
+{
+    return aggroRange + mobReach + botReach + aggroMargin + partyBuffer;
+}
+
+float DcEngageGeometry::AggroReach(Player* bot, Unit* u, float partyBuffer)
+{
+    if (!bot || !u)
+        return 0.0f;
+    Creature* c = u->ToCreature();
+    if (!c)
+        return 0.0f;
+    return AggroReachYards(c->GetAggroRange(bot), c->GetCombatReach(),
+                           bot->GetCombatReach(),
+                           DcSettings::GetFloat(bot, "AggroRangeMargin"),
+                           partyBuffer);
+}
+
 float DcEngageGeometry::AggroRangeOf(Player* bot, Unit* u, float fallback,
                                     float floorYd, float capYd)
 {
@@ -76,10 +100,14 @@ float DcEngageGeometry::AggroRangeOf(Player* bot, Unit* u, float fallback,
     if (!c)
         return fallback;            // players/totems: keep the caller's band
 
-    // Core formula: detection range adjusted by level diff, already clamped
-    // 5-45yd. Add the creature's reach so the band measures "how close the
-    // route must pass for it to pull", not just its notice distance.
-    float range = c->GetAggroRange(bot) + c->GetCombatReach();
+    // The unified reach (AggroReach, partyBuffer = 0): detection now includes
+    // the bot's own combat reach and AggroRangeMargin, exactly like the
+    // avoidance sphere, so the blocking-trash band and the avoid sphere differ
+    // by PullEnRouteMargin and nothing else. This WIDENED the band by ~3.5yd on
+    // both difficulties — deliberate (heroic over-pull transit plan §C.1): a
+    // detection formula that disagrees with the avoidance formula is a bug on
+    // every difficulty, not a heroic tuning choice.
+    float range = AggroReach(bot, c, 0.0f);
     if (range < floorYd)
         range = floorYd;
     if (range > capYd)
@@ -98,18 +126,15 @@ float DcEngageGeometry::BossEngageRange(Player* bot, AiObjectContext* ctx,
     if (!live)
         return staticRange;         // not loaded yet — use the static fallback
 
-    float const margin =
-        DcSettings::GetFloat(bot, "AggroRangeMargin");
     float const floorYd =
         DcSettings::GetFloat(bot, "BossEngageRangeFloor");
     float const capYd =
         DcSettings::GetFloat(bot, "BossEngageRangeCap");
 
-    // Hand off as the tank enters the boss's real aggro bubble: its notice
-    // distance + both reaches + a small margin so the engage trigger fires
-    // just before the boss would pull on its own.
-    float range = live->GetAggroRange(bot) + live->GetCombatReach()
-                + bot->GetCombatReach() + margin;
+    // Hand off as the tank enters the boss's real aggro bubble: the unified
+    // reach (AggroReach — notice distance + both reaches + margin) so the
+    // engage trigger fires just before the boss would pull on its own.
+    float range = AggroReach(bot, live, 0.0f);
     if (range < floorYd)
         range = floorYd;
     if (range > capYd)
@@ -146,10 +171,16 @@ float DcEngageGeometry::RoomAggroSphereRadius(Player* bot, Creature* boss)
 {
     if (!bot || !boss)
         return 0.0f;
-    return boss->GetAggroRange(bot) + bot->GetCombatReach()
-         + boss->GetCombatReach()
-         + DcSettings::GetFloat(bot, "AggroRangeMargin")
-         + DcSettings::GetFloat(bot, "RoomAggroPathPadding");
+    // The unified reach (AggroReach) with the path padding as the party buffer.
+    float const computed =
+        AggroReach(bot, boss, DcSettings::GetFloat(bot, "RoomAggroPathPadding"));
+
+    // A flagged boss may carry a per-boss skirt override (RoomAggroBoss::skirtRadius)
+    // that WIDENS this avoid sphere when the raw aggro range under-states how far the
+    // fight must stay away — a wide CallForHelp, summoned roamers that must not be
+    // fought on top of the boss (Sepethrea). Never SHRINKS below the computed sphere.
+    float const skirt = RoomAggroRegistry::SkirtOverride(boss->GetMapId(), boss->GetEntry());
+    return skirt > computed ? skirt : computed;
 }
 float DcEngageGeometry::PullCommitRange(Player* bot, Unit* target, float staticRange)
 {
@@ -162,16 +193,14 @@ float DcEngageGeometry::PullCommitRange(Player* bot, Unit* target, float staticR
     if (!c)
         return staticRange;             // players/totems: keep the fixed fallback
 
-    float const margin = DcSettings::GetFloat(bot, "AggroRangeMargin");
     float const floorYd = DcSettings::GetFloat(bot, "PullCommitRangeFloor");
     float const capYd = DcSettings::GetFloat(bot, "PullCommitRangeCap");
 
-    // Stop just as the tank would enter the pack's real aggro bubble: the core's own
-    // notice distance (Creature::GetAggroRange, already level/config-scaled and
-    // clamped 5-45yd) + both reaches + a small margin, so the commit fires a hair
-    // BEFORE the pack would pull on its own. Identical formula to BossEngageRange.
-    float range = c->GetAggroRange(bot) + c->GetCombatReach()
-                + bot->GetCombatReach() + margin;
+    // Stop just as the tank would enter the pack's real aggro bubble: the
+    // unified reach (AggroReach — notice distance + both reaches + margin), so
+    // the commit fires a hair BEFORE the pack would pull on its own. Identical
+    // formula to BossEngageRange.
+    float range = AggroReach(bot, c, 0.0f);
     if (range < floorYd)
         range = floorYd;
     if (range > capYd)
@@ -186,6 +215,12 @@ namespace
     // path can't be completed (not PATHFIND_NORMAL) or that plunges back through
     // the sphere (the only route on that side hugs a wall through the boss's aggro
     // range) is rejected so the caller can try the other way around the ring.
+    //
+    // It also rejects a leg that walks through a hazard emitter's keep-out
+    // cylinder (DcHazardRegistry). Both the short-arc and long-arc candidates go
+    // through here, so a single check covers the whole ring solver — and the
+    // orbit latch then naturally prefers whichever way around is clean of BOTH
+    // the boss sphere and the hazard.
     bool SkirtLegIsClean(Player* bot, float dx, float dy, float dz,
                          float bx, float by, float safeRadius)
     {
@@ -211,13 +246,508 @@ namespace
                     return false;
             }
         }
+
+        // Hazard screen: a skirt that swings wide of the boss straight into a
+        // damage aura trades one problem for a worse one.
+        //
+        // Tested as SEGMENTS, not vertices. PathGenerator hands back string-pulled
+        // CORNER points, not a densified line — an open-room skirt leg is often
+        // just {start, end}, so a per-vertex scan would only ever check the
+        // destination and wave through a leg that walks clean across an emitter.
+        for (size_t i = 1; i < path.size(); ++i)
+            if (DcHazard::SegmentIsHot(bot,
+                                       path[i - 1].x, path[i - 1].y, path[i - 1].z,
+                                       path[i].x, path[i].y, path[i].z))
+                return false;
+
         return true;
     }
 }
 
+int DcEngageGeometry::FirstViolatedSphere(float botX, float botY,
+                                          float targetX, float targetY,
+                                          std::vector<AvoidSphere> const& spheres)
+{
+    int best = -1;
+    float bestDist2 = std::numeric_limits<float>::max();
+    for (std::size_t i = 0; i < spheres.size(); ++i)
+    {
+        AvoidSphere const& s = spheres[i];
+        if (s.r <= 0.0f)
+            continue;
+        if (!NeedsRoomAggroSkirt(botX, botY, targetX, targetY, s.x, s.y, s.r))
+            continue;
+        float const dx = s.x - botX;
+        float const dy = s.y - botY;
+        float const d2 = dx * dx + dy * dy;
+        if (d2 < bestDist2)
+        {
+            bestDist2 = d2;
+            best = static_cast<int>(i);
+        }
+    }
+    return best;
+}
+
+std::vector<DcEngageGeometry::AvoidSphere> DcEngageGeometry::BystanderSpheres(
+    Player* bot, Position const& legEnd, Unit* exclude)
+{
+    std::vector<AvoidSphere> spheres;
+    if (!bot)
+        return spheres;
+
+    float const tx = bot->GetPositionX();
+    float const ty = bot->GetPositionY();
+    float const gx = legEnd.GetPositionX();
+    float const gy = legEnd.GetPositionY();
+    float const legLen = std::sqrt((gx - tx) * (gx - tx) + (gy - ty) * (gy - ty));
+
+    float const margin = DcSettings::GetFloat(bot, "PullEnRouteMargin");
+
+    // Search the corridor the walk actually occupies: from the bot, out past the
+    // far end of the leg, wide enough to hold any mob whose own aggro reach could
+    // touch the line. kMaxAggroReach mirrors the pull classifier's clamp (45yd
+    // notice + reach).
+    constexpr float kMaxAggroReach = 50.0f;
+    float const searchRadius = legLen + kMaxAggroReach + margin;
+
+    std::list<Creature*> nearby;
+    Acore::AnyUnitInObjectRangeCheck check(bot, searchRadius);
+    Acore::CreatureListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, nearby, check);
+    Cell::VisitObjects(bot, searcher, searchRadius);
+
+    // The destination pack (`exclude`) must NEVER become an avoid sphere — it is
+    // what the caller is walking to. Formation identity is the authority;
+    // distance is the fallback for the (common) unformationed pack. Advance
+    // passes nullptr: a glide has no pack it is deliberately walking to.
+    CreatureGroup const* targetGroup = exclude && exclude->ToCreature()
+        ? exclude->ToCreature()->GetFormation() : nullptr;
+    uint32 const targetFormation = targetGroup ? targetGroup->GetId() : 0u;
+    constexpr float kPackRadius = 12.0f;
+
+    spheres.reserve(nearby.size());
+    for (Creature* c : nearby)
+    {
+        if (!c || !c->IsAlive() || c == exclude)
+            continue;
+        if (!bot->IsHostileTo(c) || c->IsCritter() || c->IsTotem() || IsDisplayedDead(c))
+            continue;
+        // Already fighting us: its aggro is spent, and treating it as an obstacle
+        // would make the tank orbit the pack it is currently tanking.
+        if (c->IsInCombat())
+            continue;
+        // The destination pack, by formation or by proximity to the target.
+        CreatureGroup const* grp = c->GetFormation();
+        if (targetFormation && grp && grp->GetId() == targetFormation)
+            continue;
+        if (exclude && exclude->GetExactDist2d(c) <= kPackRadius)
+            continue;
+        // Another floor: near in plan view, unreachable in fact. Same constant the
+        // pull estimate and the corridor guards use.
+        if (std::fabs(c->GetPositionZ() - bot->GetPositionZ()) > DC_Z_LEVEL_TOLERANCE)
+            continue;
+
+        AvoidSphere s;
+        s.x = c->GetPositionX();
+        s.y = c->GetPositionY();
+        s.z = c->GetPositionZ();
+        // The unified reach (AggroReach) with PullEnRouteMargin as the party
+        // buffer — the same single-source sizing the detection band
+        // (AggroRangeOf) uses with buffer 0, so the two can never disagree
+        // about what "inside aggro" means.
+        s.r = AggroReach(bot, c, margin);
+        s.guid = c->GetGUID();
+        spheres.push_back(s);
+    }
+    return spheres;
+}
+
+int DcEngageGeometry::FirstViolatedSphereOnPolyline(
+    std::vector<G3D::Vector3> const& polyline,
+    std::vector<AvoidSphere> const& spheres, size_t& legOut)
+{
+    // Legs in ROUTE ORDER — the contract difference from FirstViolatedSphere
+    // (see the header note): the sphere to stop at is the one violated earliest
+    // along the route, not the one nearest the walker.
+    for (size_t leg = 0; leg + 1 < polyline.size(); ++leg)
+    {
+        int best = -1;
+        float bestDist2 = std::numeric_limits<float>::max();
+        for (std::size_t i = 0; i < spheres.size(); ++i)
+        {
+            AvoidSphere const& s = spheres[i];
+            if (s.r <= 0.0f)
+                continue;
+            if (!NeedsRoomAggroSkirt(polyline[leg].x, polyline[leg].y,
+                                     polyline[leg + 1].x, polyline[leg + 1].y,
+                                     s.x, s.y, s.r))
+                continue;
+            // Within one leg, nearest the leg start — which makes a 2-point
+            // polyline replicate FirstViolatedSphere exactly.
+            float const dx = s.x - polyline[leg].x;
+            float const dy = s.y - polyline[leg].y;
+            float const d2 = dx * dx + dy * dy;
+            if (d2 < bestDist2)
+            {
+                bestDist2 = d2;
+                best = static_cast<int>(i);
+            }
+        }
+        if (best >= 0)
+        {
+            legOut = leg;
+            return best;
+        }
+    }
+    return -1;
+}
+
+std::optional<G3D::Vector3> DcEngageGeometry::SegmentCircleEntry(
+    G3D::Vector3 const& a, G3D::Vector3 const& b, float cx, float cy, float r,
+    float backoff)
+{
+    if (r <= 0.0f)
+        return std::nullopt;
+
+    float const dx = b.x - a.x;
+    float const dy = b.y - a.y;
+    float const len2 = dx * dx + dy * dy;
+    if (len2 <= 0.0001f)
+        return std::nullopt;            // degenerate leg
+
+    float const fx = a.x - cx;
+    float const fy = a.y - cy;
+    if (fx * fx + fy * fy <= r * r)
+        return std::nullopt;            // already inside — no threshold ahead
+
+    // |a + t*(b-a) - c|^2 = r^2; the SMALLER root is the entry crossing.
+    float const bq = 2.0f * (fx * dx + fy * dy);
+    float const cq = fx * fx + fy * fy - r * r;
+    float const disc = bq * bq - 4.0f * len2 * cq;
+    if (disc < 0.0f)
+        return std::nullopt;            // the leg's line misses the circle
+
+    float const t = (-bq - std::sqrt(disc)) / (2.0f * len2);
+    if (t <= 0.0f || t > 1.0f)
+        return std::nullopt;            // crossing is behind `a` or beyond `b`
+
+    float const stop = t - backoff / std::sqrt(len2);
+    if (stop <= 0.0f)
+        return std::nullopt;            // the backoff eats the whole approach
+
+    return G3D::Vector3(a.x + dx * stop, a.y + dy * stop,
+                        a.z + (b.z - a.z) * stop);
+}
+
+bool DcEngageGeometry::TruncateWindowAtSphere(
+    std::vector<G3D::Vector3>& window, std::vector<AvoidSphere> const& spheres,
+    float minGlideYards, float backoff, size_t& legOut, int& sphereOut)
+{
+    legOut = 0;
+    sphereOut = -1;
+    if (window.size() < 2)
+        return false;
+
+    size_t leg = 0;
+    int const idx = FirstViolatedSphereOnPolyline(window, spheres, leg);
+    if (idx < 0)
+        return false;
+
+    legOut = leg;
+    sphereOut = idx;
+
+    AvoidSphere const& s = spheres[static_cast<size_t>(idx)];
+    std::vector<G3D::Vector3> cut(window.begin(),
+                                  window.begin() + static_cast<ptrdiff_t>(leg) + 1);
+    if (std::optional<G3D::Vector3> const edge =
+            SegmentCircleEntry(window[leg], window[leg + 1], s.x, s.y, s.r, backoff))
+        cut.push_back(*edge);
+
+    if (cut.size() < 2)
+        return false;                   // nothing left to glide — caller rides on
+
+    float glide = 0.0f;
+    for (size_t i = 1; i < cut.size(); ++i)
+        glide += (cut[i] - cut[i - 1]).magnitude();
+    if (glide < minGlideYards)
+        return false;                   // a stutter, not a glide — decline
+
+    window.swap(cut);
+    return true;
+}
+
+std::optional<Position> DcEngageGeometry::EnRoutePackAvoidPoint(Player* bot,
+                                                                AiObjectContext* ctx,
+                                                                Unit* target)
+{
+    if (!bot || !ctx || !target)
+        return std::nullopt;
+    if (!DcSettings::GetBool(bot, "PullEnRouteAvoid"))
+        return std::nullopt;
+
+    float const tx = bot->GetPositionX();
+    float const ty = bot->GetPositionY();
+    float const gx = target->GetPositionX();
+    float const gy = target->GetPositionY();
+    float const legLen = std::sqrt((gx - tx) * (gx - tx) + (gy - ty) * (gy - ty));
+
+    // Nothing worth detouring around inside the last couple of yards.
+    if (legLen < 1.0f)
+        return std::nullopt;
+
+    // Sphere building is shared with the Advance glide (BystanderSpheres) so the
+    // two avoidances can never disagree about what "inside aggro" means; the
+    // single-segment nearest-the-bot ordering below stays this leg's own (it
+    // feeds the orbit — see FirstViolatedSphere's header note).
+    Position const legEnd(gx, gy, target->GetPositionZ(), 0.0f);
+    std::vector<AvoidSphere> spheres = BystanderSpheres(bot, legEnd, target);
+
+    // Drop the spheres the tank is ALREADY STANDING IN. Rounding one of those is
+    // not avoidance, it is a retreat: the only waypoint that gets back outside is
+    // behind the tank, and the phase machine will cancel it within a tick or two
+    // anyway (the straight line clears, or the pull hits its commit range), so
+    // all it produces is a visible run backward followed by a run forward over
+    // the same ground. Whether the pack pulls is decided by the blocking-trash
+    // detector from here — same formula, minus the party buffer. Same rule the
+    // Advance glide's window truncation uses, so the two halves of the avoidance
+    // still agree about what they can and cannot honour.
+    spheres.erase(std::remove_if(spheres.begin(), spheres.end(),
+        [tx, ty](AvoidSphere const& s)
+        {
+            float const dx = s.x - tx;
+            float const dy = s.y - ty;
+            return dx * dx + dy * dy <= s.r * s.r;
+        }), spheres.end());
+
+    int const idx = FirstViolatedSphere(tx, ty, gx, gy, spheres);
+    if (idx < 0)
+    {
+        // Path is clear — drop any committed rotation so the next obstacle starts
+        // its own orbit unbiased.
+        DcApproachState& appr = ctx->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+        appr.avoidOrbitDir = 0;
+        appr.avoidOrbitSphere.Clear();
+        return std::nullopt;
+    }
+
+    AvoidSphere const& s = spheres[static_cast<std::size_t>(idx)];
+
+    // Re-key the orbit latch to the sphere being rounded: a different pack must
+    // start its own orbit rather than inherit "round left" from one already
+    // passed. Same reasoning as the room-aggro skirt's target re-key.
+    DcApproachState& appr = ctx->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+    if (appr.avoidOrbitSphere != s.guid)
+    {
+        appr.avoidOrbitSphere = s.guid;
+        appr.avoidOrbitDir = 0;
+    }
+
+    std::optional<Position> wp =
+        AggroSafeApproachPoint(bot, s.x, s.y, s.z, s.r, target, &appr.avoidOrbitDir,
+                               OrbitProfile::Bystander);
+    if (wp)
+        DC_PULL_DEBUG("[DC:{}] en-route avoid: {} pack(s) near the leg, rounding {} "
+                      "(r={:.1f}) -> detour ({:.1f}, {:.1f}) before approaching {}",
+                      bot->GetName(), spheres.size(), s.guid.ToString(), s.r,
+                      wp->GetPositionX(), wp->GetPositionY(), target->GetName());
+    return wp;
+}
+
+bool DcEngageGeometry::EnRouteSweepApplies(Player* bot)
+{
+    Map* const map = bot ? bot->GetMap() : nullptr;
+    if (!map || !map->IsDungeon())
+        return false;
+    // Heroic is excluded whatever the map says: there the same spheres already
+    // bend the WALK (PullEnRouteAvoid), its rooms are wide enough for that detour
+    // to exist, and its pull profile is tuned against measured baselines. Checked
+    // before the table so a map that later earns a row cannot arm heroic by
+    // accident.
+    if (map->GetDifficulty() == DUNGEON_DIFFICULTY_HEROIC)
+        return false;
+    return RouteSweepRegistry::SweepsRoute(map->GetId());
+}
+
+bool DcEngageGeometry::TargetInsideBystanderPack(Player* bot, Unit* target)
+{
+    if (!bot || !target)
+        return false;
+    // Heroic arms this through the avoidance it belongs to; normal arms it through
+    // the en-route SWEEP, which is on there and answers the same question from the
+    // other side (the sweep says "that pack's aggro covers our walk", this says
+    // "another pack's aggro covers our destination"). Either way the predicate is
+    // live on exactly one difficulty's terms and dead on neither.
+    if (!DcSettings::GetBool(bot, "PullEnRouteAvoid") && !EnRouteSweepApplies(bot))
+        return false;
+
+    float const margin = DcSettings::GetFloat(bot, "PullEnRouteMargin");
+
+    // Search around the TARGET, wide enough to hold any mob whose own padded
+    // reach could still cover it. kMaxAggroReach mirrors the pull classifier's
+    // clamp (45yd notice + reach) — the same number BystanderSpheres uses.
+    constexpr float kMaxAggroReach = 50.0f;
+    float const searchRadius = kMaxAggroReach + margin;
+
+    std::list<Creature*> nearby;
+    Acore::AnyUnitInObjectRangeCheck check(target, searchRadius);
+    Acore::CreatureListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(
+        target, nearby, check);
+    Cell::VisitObjects(target, searcher, searchRadius);
+
+    // Same packmate exclusions as BystanderSpheres: a formation-mate or anything
+    // within the pack radius comes along with the pull anyway, so it can never
+    // make its own packmate unreachable.
+    CreatureGroup const* targetGroup =
+        target->ToCreature() ? target->ToCreature()->GetFormation() : nullptr;
+    uint32 const targetFormation = targetGroup ? targetGroup->GetId() : 0u;
+    constexpr float kPackRadius = 12.0f;
+
+    for (Creature* c : nearby)
+    {
+        if (!c || !c->IsAlive() || c == target)
+            continue;
+        if (!bot->IsHostileTo(c) || c->IsCritter() || c->IsTotem() || IsDisplayedDead(c))
+            continue;
+        // Already fighting us: its aggro is spent — it is not a pack we can wake.
+        if (c->IsInCombat())
+            continue;
+        CreatureGroup const* grp = c->GetFormation();
+        if (targetFormation && grp && grp->GetId() == targetFormation)
+            continue;
+        if (target->GetExactDist2d(c) <= kPackRadius)
+            continue;
+        // Another floor: near in plan view, unreachable in fact.
+        if (std::fabs(c->GetPositionZ() - target->GetPositionZ()) > DC_Z_LEVEL_TOLERANCE)
+            continue;
+
+        if (target->GetExactDist2d(c) <= AggroReach(bot, c, margin))
+        {
+            DC_PULL_DEBUG("[DC:{}] chase leash: target {} has walked inside {}'s "
+                          "aggro sphere ({:.1f}yd) — no approach to it is clean",
+                          bot->GetName(), target->GetGUID().ToString(),
+                          c->GetGUID().ToString(), target->GetExactDist2d(c));
+            return true;
+        }
+    }
+    return false;
+}
+
+void DcEngageGeometry::AnchorChase(Player* bot, AiObjectContext* ctx, Unit* target)
+{
+    if (!bot || !ctx || !target)
+        return;
+    DcApproachState& appr = ctx->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+    appr.chaseTarget = target->GetGUID();
+    appr.chaseAnchor = target->GetPosition();
+    appr.chaseOrigin = bot->GetPosition();
+    appr.chaseHoldSince = 0;
+}
+
+DungeonClearMath::ChaseVerdict DcEngageGeometry::ChaseLeash(Player* bot,
+                                                            AiObjectContext* ctx,
+                                                            Unit* target)
+{
+    using DungeonClearMath::ChaseVerdict;
+    if (!bot || !ctx || !target)
+        return ChaseVerdict::Follow;
+
+    float const leash = DcSettings::GetFloat(bot, "PullChaseLeash");
+    if (leash <= 0.0f)
+        return ChaseVerdict::Follow;
+
+    // A mob already in combat is a fight, not a pull: whatever it is doing (kiting
+    // a follower, fleeing at low HP) the tank has to run it down, and holding for
+    // it to "come back" would abandon the party member it is chewing on.
+    if (target->IsInCombat())
+        return ChaseVerdict::Follow;
+
+    DcApproachState& appr = ctx->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+
+    // First walk at this pack: anchor to the ground the plan was made against and
+    // let this tick through untouched.
+    if (appr.chaseTarget != target->GetGUID())
+    {
+        appr.chaseTarget = target->GetGUID();
+        appr.chaseAnchor = target->GetPosition();
+        appr.chaseOrigin = bot->GetPosition();
+        appr.chaseHoldSince = 0;
+        return ChaseVerdict::Follow;
+    }
+
+    float const drift = target->GetExactDist2d(&appr.chaseAnchor);
+    float const gapAtAnchor = appr.chaseOrigin.GetExactDist2d(&appr.chaseAnchor);
+    float const gapNow = appr.chaseOrigin.GetExactDist2d(target);
+    // Only pay for the grid search once the cheap drift test says the mob has
+    // actually gone somewhere; a pack sitting on its spawn never reaches here.
+    bool const hot = drift > leash && TargetInsideBystanderPack(bot, target);
+
+    uint32 const holdMs =
+        static_cast<uint32>(DcSettings::GetFloat(bot, "PullChaseWaitSec") * 1000.0f);
+    ChaseVerdict const v = DungeonClearMath::DecideChase(
+        drift, gapAtAnchor, gapNow, hot, leash, getMSTime(), holdMs,
+        appr.chaseHoldSince);
+
+    if (v != ChaseVerdict::Follow)
+        DC_PULL_DEBUG("[DC:{}] chase leash: {} has drifted {:.1f}yd from where we "
+                      "picked it (leash {:.0f}, gap {:.1f} -> {:.1f}{}) -> {}",
+                      bot->GetName(), target->GetGUID().ToString(), drift, leash,
+                      gapAtAnchor, gapNow, hot ? ", inside another pack" : "",
+                      v == ChaseVerdict::Hold ? "HOLD" : "GIVE UP");
+
+    // GiveUp re-anchors. The hold is over either way — what it means is the
+    // CALLER's decision (the pull abandons the pack to the walk-in engage; the
+    // walk-in has nowhere left to hand it to and simply walks) and both want a
+    // clean slate rather than a latch that keeps reporting GiveUp forever. For
+    // the walk-in this is what makes the leash a PACING rule instead of a refusal:
+    // the chase resumes from here and is leashed again from the new spot, so
+    // pursuing a mob across a room costs a hold per leash-length instead of one
+    // uninterrupted sprint — and the run can never wedge on a patrol that left.
+    if (v == ChaseVerdict::GiveUp)
+    {
+        appr.chaseAnchor = target->GetPosition();
+        appr.chaseOrigin = bot->GetPosition();
+        appr.chaseHoldSince = 0;
+    }
+    return v;
+}
+
+DcEngageGeometry::OrbitStep DcEngageGeometry::OrbitRing(
+    OrbitProfile profile, float safeRadius, float botRadius, float partyMargin,
+    float maxLegYards)
+{
+    // ~34 degrees/tick keeps each leg short enough that it hugs the ring exterior.
+    constexpr float kOrbitStep = 0.6f;
+
+    OrbitStep out;
+    if (profile == OrbitProfile::RoomAggroBoss)
+    {
+        out.radius = safeRadius + partyMargin;
+        out.step = kOrbitStep;
+        return out;
+    }
+
+    // Bystander: ride the tank's own stand-off, so the waypoint is neither
+    // further from the pack than the tank already is (the backward run) nor
+    // nearer (walking INTO a pack we are trying to avoid, which the fixed boss
+    // ring did whenever the tank passed wide of one). safeRadius is the floor:
+    // it already includes PullEnRouteMargin, and the caller drops spheres the
+    // tank is inside, so in practice botRadius > safeRadius and the max() is a
+    // guard against a mob that closed the gap between selection and here.
+    out.radius = std::max(botRadius, safeRadius);
+
+    // Bound the LEG, not the angle. At the boss ring's fixed 0.6rad a step is
+    // ~12yd of chord at 20yd of stand-off and ~35yd at 60 — and the long one is
+    // a committed MoveTo that the next tick's early-out routinely throws away.
+    // Keep one sidestep cheap enough to abandon.
+    out.step = out.radius > 0.0f
+        ? std::min(kOrbitStep, maxLegYards / out.radius)
+        : kOrbitStep;
+    return out;
+}
+
 std::optional<Position> DcEngageGeometry::AggroSafeApproachPoint(
     Player* bot, float bx, float by, float bz, float safeRadius, Unit* target,
-    int8* orbitDir)
+    int8* orbitDir, OrbitProfile profile)
 {
     if (!bot || !target || safeRadius <= 0.0f)
         return std::nullopt;
@@ -227,9 +757,25 @@ std::optional<Position> DcEngageGeometry::AggroSafeApproachPoint(
     float const gx = target->GetPositionX();
     float const gy = target->GetPositionY();
 
-    // Distance from the boss centre to the target (the kept room-trash is always
-    // OUTSIDE the aggro sphere, so this is > safeRadius).
+    // Distance from the boss centre to the target. USUALLY > safeRadius (kept
+    // room-trash sits outside the aggro sphere), but a forced-advanced pull
+    // (RoomAggroBoss::pullOutRadius) deliberately KEEPS a pack as room-trash while
+    // it stands INSIDE the nominal sphere — the Mechanar dead band, where Pack B
+    // sits ~17yd from Nethermancer Sepethrea, inside her ~36yd avoid sphere.
     float const targetDist = std::sqrt((gx - bx) * (gx - bx) + (gy - by) * (gy - by));
+
+    // Skirting a target that sits INSIDE the avoid sphere is the same incoherent
+    // infinite-orbit as skirting the boss itself: the straight line bot->target
+    // always ends inside the sphere, so the early-out below can never fire and the
+    // tank orbits the ring forever (the live Sepethrea room-clear deadlock —
+    // "skirting ... before approaching Bloodwarder Centurion" logged every tick,
+    // never closing the last yard to pull-commit range). Cap the effective avoid
+    // radius just under the target so a dead-band pack resolves to a radial walk-in
+    // that stops at the pack. No-op for every ordinary room-aggro boss: their kept
+    // trash is always outside safeRadius, so the min() never binds.
+    safeRadius = std::min(safeRadius, targetDist - 1.0f);
+    if (safeRadius <= 0.0f)
+        return std::nullopt;
 
     // Stand WELL back from the aggro sphere, not hard against it. The party
     // follows the tank imperfectly and cuts the corner, so a tight skirt right on
@@ -246,8 +792,16 @@ std::optional<Position> DcEngageGeometry::AggroSafeApproachPoint(
     // target's own distance (else the orbit could never resolve to a straight shot
     // — the target would sit inside the test ring forever, the boss-centre
     // infinite-orbit trap). Never below raw aggro: we always clear the sphere.
-    float const earlyOutR = std::max(safeRadius,
-        std::min(safeRadius + partyMargin, targetDist - 1.0f));
+    //
+    // Bystander: the sphere IS the clearance. safeRadius already carries
+    // PullEnRouteMargin (BystanderSpheres sizes it that way), so demanding a
+    // second RoomAggroPartyMargin on top asks the tank to swing wide of a
+    // ~40yd phantom around a trash pack — an arc most corridors cannot offer, and
+    // the reason the orbit kept running when the walk was already clear of aggro.
+    float const earlyOutR = profile == OrbitProfile::Bystander
+        ? safeRadius
+        : std::max(safeRadius,
+                   std::min(safeRadius + partyMargin, targetDist - 1.0f));
 
     // Does the straight 2D approach bot->target already keep that clearance from
     // the boss's aggro sphere? Then no detour — engage directly. Release the orbit
@@ -269,15 +823,21 @@ std::optional<Position> DcEngageGeometry::AggroSafeApproachPoint(
     float const angG = std::atan2(gy - by, gx - bx);  // target bearing from boss
     // Shortest signed turn phi->angG, in (-pi, pi].
     float const delta = std::atan2(std::sin(angG - phi), std::cos(angG - phi));
-    // ~34 degrees/tick keeps each leg short enough that it hugs the ring exterior.
-    constexpr float kOrbitStep = 0.6f;
-    // Orbit ring: the aggro sphere PLUS the party buffer, so the tank arcs wide
-    // around the OUTSIDE with the followers clear of aggro. For a pack that sits
-    // closer in than this ring (the edge packs at the room's inner wall), the tank
-    // backs out past it to the ring, lines up the bearing, then steps straight IN —
-    // a radial leg that clears the sphere — instead of hugging the aggro edge the
-    // whole way around. Capped to the room via the navmesh snap below.
-    float const wpR = safeRadius + partyMargin;
+
+    // Orbit ring and angular step, per profile (OrbitRing):
+    //   RoomAggroBoss — the aggro sphere PLUS the party buffer, so the tank arcs
+    //     wide around the OUTSIDE with the followers clear of aggro. For a pack
+    //     that sits closer in than this ring (the edge packs at the room's inner
+    //     wall), the tank backs out past it to the ring, lines up the bearing,
+    //     then steps straight IN — a radial leg that clears the sphere — instead
+    //     of hugging the aggro edge the whole way around.
+    //   Bystander — the tank's OWN stand-off, so the step is pure sidestep.
+    // Capped to the room via the navmesh snap below either way.
+    float const botR = std::sqrt((tx - bx) * (tx - bx) + (ty - by) * (ty - by));
+    OrbitStep const orbit = OrbitRing(profile, safeRadius, botR, partyMargin,
+                                      DC_ORBIT_MAX_LEG_YARDS);
+    float const kOrbitStep = orbit.step;
+    float const wpR = orbit.radius;
 
     // Snap a ring waypoint at `bearing` to the navmesh.
     auto ringPoint = [&](float bearing) -> std::optional<Position>
@@ -415,6 +975,21 @@ bool DcEngageGeometry::IsAtBossEngage(Player* bot, AiObjectContext* ctx,
     if (!bot || !ctx)
         return false;
 
+    // PULL-BACK boss (BossPullbackRegistry): "at the boss" means AT THE ANCHOR,
+    // never at the boss. Ghaz'an lives in open water ~150yd of path away from his
+    // anchor, so measuring against his LIVE position would keep this false while
+    // the tank stands on the anchor — and Advance, which gates on the same
+    // predicate, would keep walking the party toward him until they were all
+    // swimming. Measure the anchor instead: arriving there IS the handoff, and the
+    // engage action then runs the tag-and-drag that brings the boss to the party.
+    // Deliberately skips the live-boss floor probe too — the boss is on the water
+    // sheet, a different level by construction.
+    if (BossPullbackRegistry::Find(bot->GetMapId(), boss.entry))
+    {
+        float const engageRange = BossEngageRange(bot, ctx, boss, staticRange);
+        return bot->GetDistance(boss.x, boss.y, boss.z) < engageRange;
+    }
+
     Creature* live = DcTargeting::GetLiveBoss(bot, ctx, boss.entry);
     float const bx = live ? live->GetPositionX() : boss.x;
     float const by = live ? live->GetPositionY() : boss.y;
@@ -492,6 +1067,11 @@ bool DcEngageGeometry::TankReachedRoomByPath(Player* bot, AiObjectContext* ctx,
     if (gen.GetPathType() != PATHFIND_NORMAL)
         return false;
     return gen.getPathLength() <= window;
+}
+
+bool DcEngageGeometry::IsDisplayedDead(Unit const* u)
+{
+    return u && u->HasDynamicFlag(UNIT_DYNFLAG_DEAD);
 }
 
 bool DcEngageGeometry::IsRangedAttacker(Player* bot, Unit* u)
@@ -614,6 +1194,14 @@ bool DcEngageGeometry::IsDoorClosed(GameObject const* go)
     // portcullises) as closed, parking the tank in front of an open gate.
     return go->GetGoState() == GO_STATE_READY;
 }
+bool DcEngageGeometry::IsNavReachable(Player* bot, Position const& p)
+{
+    if (!bot)
+        return false;
+    PathGenerator gen(bot);
+    gen.CalculatePath(p.GetPositionX(), p.GetPositionY(), p.GetPositionZ());
+    return gen.GetPathType() == PATHFIND_NORMAL;
+}
 bool DcEngageGeometry::ClosedDoorBetween(WorldObject* from, float tx, float ty,
                                          float tz, float /*corridorWidth*/)
 {
@@ -708,6 +1296,7 @@ float DcEngageGeometry::DistAlongPathToClosedDoor(
     float const bandSq = DC_DOOR_BAND * DC_DOOR_BAND;
     float const botX = bot->GetPositionX();
     float const botY = bot->GetPositionY();
+    float const botZ = bot->GetPositionZ();
 
     float const zBand = DC_DOOR_Z_BAND;
     float prevX = 0.0f, prevY = 0.0f, prevZ = 0.0f;
@@ -738,9 +1327,18 @@ float DcEngageGeometry::DistAlongPathToClosedDoor(
             float const dy = py - prevY;
             accumulated += std::sqrt(dx * dx + dy * dy);
         }
+        // The bot's progress cursor, picked in 3D — same rule (and same reason)
+        // as DungeonClearMath::PathProgressCursor. A 2D pick took the vertex on
+        // whichever storey happened to lie closest from above: in Shadowfang
+        // Keep's tower the landing 10yd up the staircase beat the tank's own
+        // floor, cursorAccum jumped most of the way up the stairs, and this
+        // returned "8.0yd" for Arugal's Lair 27yd overhead — inside
+        // DC_DOOR_STOP_DISTANCE, so the tank parked at the foot of the stairs and
+        // the run auto-paused on a door it never approached.
         float const bdx = px - botX;
         float const bdy = py - botY;
-        float const bd2 = bdx * bdx + bdy * bdy;
+        float const bdz = pz - botZ;
+        float const bd2 = bdx * bdx + bdy * bdy + bdz * bdz;
         if (bd2 < bestBotDistSq)
         {
             bestBotDistSq = bd2;

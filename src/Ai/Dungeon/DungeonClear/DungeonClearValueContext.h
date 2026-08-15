@@ -11,78 +11,78 @@
 #include "Ai/Dungeon/DungeonClear/Value/DungeonBossesValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearBlockingDoorValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearFarTargetsValue.h"
+#include "Ai/Dungeon/DungeonClear/Value/DungeonClearHazardsValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLiveBossValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLongPathValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearPartyTankValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearPullModeCurrentValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearHealTargetValue.h"
+#include "Ai/Dungeon/DungeonClear/Value/DungeonClearPartyMemberToHealValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearPullTargetValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearRoomTrashValue.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearStateValues.h"
 #include "Ai/Dungeon/DungeonClear/Value/NextDungeonBossValue.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class DungeonClearValueContext : public NamedObjectContext<UntypedValue>
 {
 public:
     DungeonClearValueContext() : NamedObjectContext<UntypedValue>(false, false)
     {
-        creators["dungeon bosses"] = &DungeonClearValueContext::dungeon_bosses;
-        creators["next dungeon boss"] = &DungeonClearValueContext::next_dungeon_boss;
-        creators["dungeon clear live boss"] = &DungeonClearValueContext::dungeon_clear_live_boss;
-        creators["dungeon clear enabled"] = &DungeonClearValueContext::dungeon_clear_enabled;
-        creators["dungeon clear paused"] = &DungeonClearValueContext::dungeon_clear_paused;
-        creators["dungeon clear pause reason"] = &DungeonClearValueContext::dungeon_clear_pause_reason;
-        creators["dungeon clear paused door"] = &DungeonClearValueContext::dungeon_clear_paused_door;
-        creators["dungeon clear skipped"] = &DungeonClearValueContext::dungeon_clear_skipped;
-        creators["dungeon clear cleared anchors"] = &DungeonClearValueContext::dungeon_clear_cleared_anchors;
-        creators["dungeon clear seen bosses"] = &DungeonClearValueContext::dungeon_clear_seen_bosses;
-        creators["dungeon clear seen due events"] = &DungeonClearValueContext::dungeon_clear_seen_due_events;
-        creators["dungeon clear sticky boss"] = &DungeonClearValueContext::dungeon_clear_sticky_boss;
-        creators["dungeon clear selected boss"] = &DungeonClearValueContext::dungeon_clear_selected_boss;
-        creators["dungeon clear run instance"] = &DungeonClearValueContext::dungeon_clear_run_instance;
-        creators["dungeon clear stall reason"] = &DungeonClearValueContext::dungeon_clear_stall_reason;
-        creators["dungeon clear last said reason"] = &DungeonClearValueContext::dungeon_clear_last_said_reason;
-        creators["dungeon clear phase"] = &DungeonClearValueContext::dungeon_clear_phase;
-        creators["dungeon clear fallback target"] = &DungeonClearValueContext::dungeon_clear_fallback_target;
-        creators["dungeon clear party tank"] = &DungeonClearValueContext::dungeon_clear_party_tank;
-        creators["dungeon clear long path"] = &DungeonClearValueContext::dungeon_clear_long_path;
-        creators["dungeon clear current hop"] = &DungeonClearValueContext::dungeon_clear_current_hop;
-        creators["dungeon clear far targets"] = &DungeonClearValueContext::dungeon_clear_far_targets;
-        creators["dungeon clear room trash remaining"] = &DungeonClearValueContext::dungeon_clear_room_trash_remaining;
-        creators["dungeon clear blocking door"] = &DungeonClearValueContext::dungeon_clear_blocking_door;
-        creators["dungeon clear engage trash target"] = &DungeonClearValueContext::dungeon_clear_engage_trash_target;
-        creators["dungeon clear follower state"] = &DungeonClearValueContext::dungeon_clear_follower_state;
-        creators["dungeon clear swim state"] = &DungeonClearValueContext::dungeon_clear_swim_state;
-        creators["dungeon clear loot skip"] = &DungeonClearValueContext::dungeon_clear_loot_skip;
-        creators["dungeon clear loot camp guid"] = &DungeonClearValueContext::dungeon_clear_loot_camp_guid;
-        creators["dungeon clear loot camp start"] = &DungeonClearValueContext::dungeon_clear_loot_camp_start;
-        creators["dungeon clear followed tank"] = &DungeonClearValueContext::dungeon_clear_followed_tank;
-        creators["dungeon clear pull mode"] = &DungeonClearValueContext::dungeon_clear_pull_mode;
-        creators["dungeon clear pull mode current"] = &DungeonClearValueContext::dungeon_clear_pull_mode_current;
-        creators["dungeon clear pull target"] = &DungeonClearValueContext::dungeon_clear_pull_target;
-        creators["dungeon clear heal target"] = &DungeonClearValueContext::dungeon_clear_heal_target;
-        creators["dungeon clear pull setting"] = &DungeonClearValueContext::dungeon_clear_pull_setting;
-        creators["dungeon clear pull context"] = &DungeonClearValueContext::dungeon_clear_pull_context;
-        creators["dungeon clear approach state"] = &DungeonClearValueContext::dungeon_clear_approach_state;
-        creators["dungeon clear tick memo"] = &DungeonClearValueContext::dungeon_clear_tick_memo;
-        creators["dungeon clear event progress"] = &DungeonClearValueContext::dungeon_clear_event_progress;
-        creators["dungeon clear conditional event progress"] = &DungeonClearValueContext::dungeon_clear_conditional_event_progress;
+        creators[DcKey::DungeonBosses] = &DungeonClearValueContext::dungeon_bosses;
+        creators[DcKey::NextDungeonBoss] = &DungeonClearValueContext::next_dungeon_boss;
+        creators[DcKey::LiveBoss] = &DungeonClearValueContext::dungeon_clear_live_boss;
+        creators[DcKey::RunState] = &DungeonClearValueContext::dungeon_clear_run_state;
+        creators[DcKey::Skipped] = &DungeonClearValueContext::dungeon_clear_skipped;
+        creators[DcKey::ClearedAnchors] = &DungeonClearValueContext::dungeon_clear_cleared_anchors;
+        creators[DcKey::SeenBosses] = &DungeonClearValueContext::dungeon_clear_seen_bosses;
+        creators[DcKey::SeenDueEvents] = &DungeonClearValueContext::dungeon_clear_seen_due_events;
+        creators[DcKey::StickyBoss] = &DungeonClearValueContext::dungeon_clear_sticky_boss;
+        creators[DcKey::RunInstance] = &DungeonClearValueContext::dungeon_clear_run_instance;
+        creators[DcKey::StallReason] = &DungeonClearValueContext::dungeon_clear_stall_reason;
+        creators[DcKey::LastSaidReason] = &DungeonClearValueContext::dungeon_clear_last_said_reason;
+        creators[DcKey::Phase] = &DungeonClearValueContext::dungeon_clear_phase;
+        creators[DcKey::FallbackTarget] = &DungeonClearValueContext::dungeon_clear_fallback_target;
+        creators[DcKey::PartyTank] = &DungeonClearValueContext::dungeon_clear_party_tank;
+        creators[DcKey::LongPath] = &DungeonClearValueContext::dungeon_clear_long_path;
+        creators[DcKey::CurrentHop] = &DungeonClearValueContext::dungeon_clear_current_hop;
+        creators[DcKey::FarTargets] = &DungeonClearValueContext::dungeon_clear_far_targets;
+        creators[DcKey::Hazards] = &DungeonClearValueContext::dungeon_clear_hazards;
+        creators[DcKey::RoomTrashRemaining] = &DungeonClearValueContext::dungeon_clear_room_trash_remaining;
+        creators[DcKey::BlockingDoor] = &DungeonClearValueContext::dungeon_clear_blocking_door;
+        creators[DcKey::EngageTrashTarget] = &DungeonClearValueContext::dungeon_clear_engage_trash_target;
+        creators[DcKey::FollowerState] = &DungeonClearValueContext::dungeon_clear_follower_state;
+        creators[DcKey::SwimState] = &DungeonClearValueContext::dungeon_clear_swim_state;
+        creators[DcKey::LootSkip] = &DungeonClearValueContext::dungeon_clear_loot_skip;
+        creators[DcKey::LootCampGuid] = &DungeonClearValueContext::dungeon_clear_loot_camp_guid;
+        creators[DcKey::LootCampStart] = &DungeonClearValueContext::dungeon_clear_loot_camp_start;
+        creators[DcKey::FollowedTank] = &DungeonClearValueContext::dungeon_clear_followed_tank;
+        creators[DcKey::PullMode] = &DungeonClearValueContext::dungeon_clear_pull_mode;
+        creators[DcKey::PullModeCurrent] = &DungeonClearValueContext::dungeon_clear_pull_mode_current;
+        creators[DcKey::PullTarget] = &DungeonClearValueContext::dungeon_clear_pull_target;
+        creators[DcKey::HealTarget] = &DungeonClearValueContext::dungeon_clear_heal_target;
+        // Decorator over the stock heal-target value: registered under the STOCK
+        // name so it fronts it (last-wins merge; see the value's header). Diverts to
+        // the DC escortee only while an escort is active; else returns stock verbatim.
+        creators[DcKey::Stock::PartyToHeal] = &DungeonClearValueContext::dungeon_clear_party_member_to_heal;
+        creators[DcKey::PullSetting] = &DungeonClearValueContext::dungeon_clear_pull_setting;
+        creators[DcKey::PullContext] = &DungeonClearValueContext::dungeon_clear_pull_context;
+        creators[DcKey::ApproachState] = &DungeonClearValueContext::dungeon_clear_approach_state;
+        creators[DcKey::TickMemo] = &DungeonClearValueContext::dungeon_clear_tick_memo;
+        creators[DcKey::EventProgress] = &DungeonClearValueContext::dungeon_clear_event_progress;
+        creators[DcKey::ConditionalEventProgress] = &DungeonClearValueContext::dungeon_clear_conditional_event_progress;
     }
 
 private:
     static UntypedValue* dungeon_bosses(PlayerbotAI* ai) { return new DungeonBossesValue(ai); }
     static UntypedValue* next_dungeon_boss(PlayerbotAI* ai) { return new NextDungeonBossValue(ai); }
     static UntypedValue* dungeon_clear_live_boss(PlayerbotAI* ai) { return new DungeonClearLiveBossValue(ai); }
-    static UntypedValue* dungeon_clear_enabled(PlayerbotAI* ai) { return new DungeonClearEnabledValue(ai); }
-    static UntypedValue* dungeon_clear_paused(PlayerbotAI* ai) { return new DungeonClearPausedValue(ai); }
-    static UntypedValue* dungeon_clear_pause_reason(PlayerbotAI* ai) { return new DungeonClearPauseReasonValue(ai); }
-    static UntypedValue* dungeon_clear_paused_door(PlayerbotAI* ai) { return new DungeonClearPausedDoorValue(ai); }
+    static UntypedValue* dungeon_clear_run_state(PlayerbotAI* ai) { return new DungeonClearRunStateValue(ai); }
     static UntypedValue* dungeon_clear_skipped(PlayerbotAI* ai) { return new DungeonClearSkippedValue(ai); }
     static UntypedValue* dungeon_clear_cleared_anchors(PlayerbotAI* ai) { return new DungeonClearClearedAnchorsValue(ai); }
     static UntypedValue* dungeon_clear_seen_bosses(PlayerbotAI* ai) { return new DungeonClearSeenBossesValue(ai); }
     static UntypedValue* dungeon_clear_seen_due_events(PlayerbotAI* ai) { return new DungeonClearSeenDueEventsValue(ai); }
     static UntypedValue* dungeon_clear_sticky_boss(PlayerbotAI* ai) { return new DungeonClearStickyBossValue(ai); }
-    static UntypedValue* dungeon_clear_selected_boss(PlayerbotAI* ai) { return new DungeonClearSelectedBossValue(ai); }
     static UntypedValue* dungeon_clear_run_instance(PlayerbotAI* ai) { return new DungeonClearRunInstanceValue(ai); }
     static UntypedValue* dungeon_clear_stall_reason(PlayerbotAI* ai) { return new DungeonClearStallReasonValue(ai); }
     static UntypedValue* dungeon_clear_last_said_reason(PlayerbotAI* ai) { return new DungeonClearLastSaidReasonValue(ai); }
@@ -92,6 +92,7 @@ private:
     static UntypedValue* dungeon_clear_long_path(PlayerbotAI* ai) { return new DungeonClearLongPathValue(ai); }
     static UntypedValue* dungeon_clear_current_hop(PlayerbotAI* ai) { return new DungeonClearCurrentHopValue(ai); }
     static UntypedValue* dungeon_clear_far_targets(PlayerbotAI* ai) { return new DungeonClearFarTargetsValue(ai); }
+    static UntypedValue* dungeon_clear_hazards(PlayerbotAI* ai) { return new DungeonClearHazardsValue(ai); }
     static UntypedValue* dungeon_clear_room_trash_remaining(PlayerbotAI* ai) { return new DungeonClearRoomTrashValue(ai); }
     static UntypedValue* dungeon_clear_blocking_door(PlayerbotAI* ai) { return new DungeonClearBlockingDoorValue(ai); }
     static UntypedValue* dungeon_clear_engage_trash_target(PlayerbotAI* ai) { return new DungeonClearEngageTrashTargetValue(ai); }
@@ -105,6 +106,7 @@ private:
     static UntypedValue* dungeon_clear_pull_mode_current(PlayerbotAI* ai) { return new DungeonClearPullModeCurrentValue(ai); }
     static UntypedValue* dungeon_clear_pull_target(PlayerbotAI* ai) { return new DungeonClearPullTargetValue(ai); }
     static UntypedValue* dungeon_clear_heal_target(PlayerbotAI* ai) { return new DungeonClearHealTargetValue(ai); }
+    static UntypedValue* dungeon_clear_party_member_to_heal(PlayerbotAI* ai) { return new DungeonClearPartyMemberToHealValue(ai); }
     static UntypedValue* dungeon_clear_pull_setting(PlayerbotAI* ai) { return new DungeonClearPullSettingValue(ai); }
     static UntypedValue* dungeon_clear_pull_context(PlayerbotAI* ai) { return new DungeonClearPullContextValue(ai); }
     static UntypedValue* dungeon_clear_approach_state(PlayerbotAI* ai) { return new DungeonClearApproachStateValue(ai); }

@@ -10,15 +10,21 @@
 #include <vector>
 
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
-#include "Ai/Dungeon/DungeonClear/Data/EventConditionRegistry.h"
+
+class Player;
+class AiObjectContext;
+struct BossRosterPatch;
+struct DungeonWingLayout;
 
 // Internal registration seam for the per-dungeon event tables.
 //
 // Each dungeon owns one .cpp in this folder that defines its event rows
-// (Register<Dungeon>Events) and, when it has conditional events, its activation
-// predicates (Register<Dungeon>Conditions). The two central registries
-// (DungeonEventRegistry / EventConditionRegistry) call these aggregators
-// EXPLICITLY so every per-dungeon translation unit stays referenced.
+// (Register<Dungeon>Events). A Conditional event's activation predicate is a
+// free function defined in the SAME file, handed to the builder by pointer
+// (.Conditional(&MyPredicate)) — there is no separate condition registry and no
+// global id space to keep collision-free. The central DungeonEventRegistry calls
+// the Register<Dungeon>Events aggregators EXPLICITLY so every per-dungeon
+// translation unit stays referenced.
 //
 // Why explicit calls and not self-registering static initializers: the module
 // compiles into a static lib, and a TU whose only output is constructor
@@ -30,41 +36,22 @@
 //
 // Adding a dungeon:
 //   1. Create <Dungeon>Events.cpp here.
-//   2. Define Register<Dungeon>Events (and Conditions, if it has any).
-//   3. Declare them below.
-//   4. Add the call in the matching aggregator (EventTable() in
-//      DungeonEventRegistry.cpp / Conditions() in EventConditionRegistry.cpp).
-//
-// Condition id allocation — the global id space referenced by .Conditional(id).
-// Keep this list authoritative when adding rows so ids never collide:
-//   1  Shadowfang Keep  — courtyard door, Alliance
-//   2  Shadowfang Keep  — courtyard door, Horde
-//   3  (shared)         — room-aggro pre-clear (every RoomAggroRegistry boss:
-//                         SM Cathedral, Scholomance Marduk & Vectus, ...)
-//   4  Razorfen Downs   — the gong
-//   5  Stratholme       — ziggurat 1 acolytes (Baroness, door open)
-//   6  Stratholme       — ziggurat 2 acolytes (Nerub'enkan, door open)
-//   7  Stratholme       — ziggurat 3 acolytes (Maleki, door open)
-//   8  Uldaman          — Ironaya seal (clear room + keystone)
-//   9  (free)           — was Uldaman Altar of the Keepers; now an ANCHORED event
-//                         (70/2) on a roster objective (BossRosterRegistry map 70)
-//  10  (free)           — was Uldaman Altar of Archaedas; now an ANCHORED event
-//                         (70/3) on a roster objective
-//  11  Razorfen Downs   — approach Tuten'kash (walk to his combat spot once the
-//                         gong summons him, so the party enters aggro range)
-//  12  Dire Maul North  — Gordok Courtyard Door (on-path; click to open)
-//  13  Dire Maul North  — Gordok Inner Door (on-path; click to open)
-//  14  Dire Maul West   — Crescent Key Door, lower (on-path; click to open)
-//  15  Dire Maul West   — Crescent Key Door, upper (on-path; click to open)
-//  16  Hellfire Ramparts— approach Vazruden (walk onto the platform between the
-//                         two Hellfire Sentries; killing them flies the summoned
-//                         boss down, who has no static spawn)
-//  17  Blood Furnace    — pull Broggok's Cell Door Lever (start the wave event)
-//  18  Blood Furnace    — hold at the lever through the four cell waves until the
-//                         rear gate opens and Broggok becomes attackable
-//   -- next free: 19 (9 and 10 may be reused)
-using EventConditionMap =
-    std::unordered_map<uint32, EventConditionRegistry::Condition>;
+//   2. Define Register<Dungeon>Events; for any Conditional event, define its
+//      predicate as a static free function in that file and pass &Predicate to
+//      .Conditional() (a typo is a compile error, not a silent never-fire).
+//   3. Declare the appender below.
+//   4. Add the call in EventTable() (DungeonEventRegistry.cpp).
+//   5. If the dungeon corrects the auto-derived boss list, define its roster
+//      patch as Register<Dungeon>Roster in the SAME file (using the DcRoster
+//      builders in DungeonRosterBuilders.h), declare it below, and add the call
+//      in PatchTable() (BossRosterRegistry.cpp). One file owns all of a
+//      dungeon's clear data: event rows + conditions + roster patch.
+
+// Shared, cross-dungeon activation predicate — external linkage so several
+// dungeon files can pass &DcRoomAggroPreClearCondition to .Conditional().
+// DUE while the room-trash value still has anything to clear (every
+// RoomAggroRegistry boss: SM Cathedral, Scholomance Marduk & Vectus, ...).
+bool DcRoomAggroPreClearCondition(Player* bot, AiObjectContext* context);
 
 // --- event rows (one appender per dungeon) -------------------------------
 void RegisterSunkenTempleEvents(std::vector<DungeonEvent>& out);
@@ -83,15 +70,71 @@ void RegisterHellfireRampartsEvents(std::vector<DungeonEvent>& out);
 void RegisterBloodFurnaceEvents(std::vector<DungeonEvent>& out);
 void RegisterSlavePensEvents(std::vector<DungeonEvent>& out);
 void RegisterUnderbogEvents(std::vector<DungeonEvent>& out);
+void RegisterOldHillsbradEvents(std::vector<DungeonEvent>& out);
+void RegisterMechanarEvents(std::vector<DungeonEvent>& out);
+void RegisterShatteredHallsEvents(std::vector<DungeonEvent>& out);
+void RegisterSteamvaultEvents(std::vector<DungeonEvent>& out);
+void RegisterArcatrazEvents(std::vector<DungeonEvent>& out);
+void RegisterSethekkHallsEvents(std::vector<DungeonEvent>& out);
+void RegisterBlackMorassEvents(std::vector<DungeonEvent>& out);
+// Everything in the Black Morass wave that DRAINS Medivh's shield rather than
+// fighting the party: the nine trash adds (smart_scripts SMART_EVENT_RESET ->
+// CAST 'Corrupt Medivh' 31326 on SELF) AND AEONUS, whose boss_aeonus::
+// IsSummonedBy does the same thing in C++ and whose 37853 drains at DOUBLE the
+// rate. All of them spawn REACT_DEFENSIVE and park at a home 14yd from Medivh, so
+// they never aggro the party and the engage pipeline's natural pull never reaches
+// them — the wave driver (ObjectiveHookRegistry hook 12) force-pulls them and
+// counts them to decide when Medivh's ring needs cleaning. Excludes the Rift
+// Lords / Keepers and the wave-6/12 bosses, which all fight normally.
+std::vector<uint32> const& BlackMorassDrainEntries();
 
-// --- activation conditions (only for dungeons with Conditional events) ----
-void RegisterSharedEventConditions(EventConditionMap& out);
-void RegisterShadowfangKeepConditions(EventConditionMap& out);
-void RegisterRazorfenDownsConditions(EventConditionMap& out);
-void RegisterStratholmeConditions(EventConditionMap& out);
-void RegisterUldamanConditions(EventConditionMap& out);
-void RegisterDireMaulConditions(EventConditionMap& out);
-void RegisterHellfireRampartsConditions(EventConditionMap& out);
-void RegisterBloodFurnaceConditions(EventConditionMap& out);
+// The Black Morass RIFT KEEPERS — the mob each Time Rift summons 6s after it
+// opens, and the ONLY thing whose death closes the rift
+// (npc_time_rift::SummonedCreatureDies -> DespawnOrUnsummon). Shared with the
+// wave driver (ObjectiveHookRegistry hook 12), which selects and pulls by it.
+// Disjoint from BlackMorassDrainEntries() on purpose: keepers fight normally and
+// never channel Corrupt, so they are never sweep targets — and the drainers never
+// close a rift, so they are never selection targets.
+//
+// AEONUS IS NOT HERE despite being the wave-18 boss: it walks off to Medivh the
+// instant it spawns (so it is never at the rift to select on) and it is not its
+// rift's _riftKeeperGUID (so killing it closes nothing). It is a drainer.
+std::vector<uint32> const& BlackMorassKeeperEntries();
+
+// --- roster patches (one appender per dungeon that corrects the boss list) -
+// Each relocates that dungeon's BossRosterPatch out of BossRosterRegistry.cpp
+// so a dungeon's whole clear definition lives in one file. Aggregated by
+// PatchTable() (BossRosterRegistry.cpp). Only dungeons that patch the derived
+// roster appear here (e.g. Shadowfang Keep / Blood Furnace have events but no
+// patch, so no roster appender).
+void RegisterScarletMonasteryRoster(std::vector<BossRosterPatch>& t);
+void RegisterScholomanceRoster(std::vector<BossRosterPatch>& t);
+void RegisterSunkenTempleRoster(std::vector<BossRosterPatch>& t);
+void RegisterRazorfenDownsRoster(std::vector<BossRosterPatch>& t);
+void RegisterZulFarrakRoster(std::vector<BossRosterPatch>& t);
+void RegisterBlackrockDepthsRoster(std::vector<BossRosterPatch>& t);
+void RegisterDeadminesRoster(std::vector<BossRosterPatch>& t);
+void RegisterWailingCavernsRoster(std::vector<BossRosterPatch>& t);
+void RegisterStratholmeRoster(std::vector<BossRosterPatch>& t);
+void RegisterDireMaulRoster(std::vector<BossRosterPatch>& t);
+void RegisterUldamanRoster(std::vector<BossRosterPatch>& t);
+void RegisterHellfireRampartsRoster(std::vector<BossRosterPatch>& t);
+void RegisterSlavePensRoster(std::vector<BossRosterPatch>& t);
+void RegisterUnderbogRoster(std::vector<BossRosterPatch>& t);
+void RegisterOldHillsbradRoster(std::vector<BossRosterPatch>& t);
+void RegisterMechanarRoster(std::vector<BossRosterPatch>& t);
+void RegisterShatteredHallsRoster(std::vector<BossRosterPatch>& t);
+void RegisterSteamvaultRoster(std::vector<BossRosterPatch>& t);
+void RegisterArcatrazRoster(std::vector<BossRosterPatch>& t);
+void RegisterSethekkHallsRoster(std::vector<BossRosterPatch>& t);
+void RegisterBlackMorassRoster(std::vector<BossRosterPatch>& t);
+
+// --- wing layouts (one appender per split map) ---------------------------
+// Records which boss credit-entries belong to which wing of a multi-wing map;
+// aggregated by DungeonWingRegistry. Only split maps appear here. Maraudon is
+// wings-only (no events/roster) and lives in MaraudonEvents.cpp.
+void RegisterDireMaulWings(std::unordered_map<uint32, DungeonWingLayout>& store);
+void RegisterScarletMonasteryWings(std::unordered_map<uint32, DungeonWingLayout>& store);
+void RegisterMaraudonWings(std::unordered_map<uint32, DungeonWingLayout>& store);
 
 #endif

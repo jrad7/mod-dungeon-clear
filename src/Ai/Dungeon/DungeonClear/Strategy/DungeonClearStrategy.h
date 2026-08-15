@@ -20,11 +20,13 @@ public:
     void InitMultipliers(std::vector<Multiplier*>& multipliers) override;
 };
 
-// Combat-engine companion to "dungeon clear". Holds ONLY the advanced-pull
-// maneuver trigger — the in-combat half of the pull-to-camp, which can't live in
-// the non-combat strategy because the bot runs its combat engine the instant it
+// Combat-engine companion to "dungeon clear". Holds the advanced-pull maneuver and
+// the in-combat follower assist/hold triggers — the in-combat halves that can't live
+// in the non-combat strategy because the bot runs its combat engine the instant it
 // aggros. Resident on every bot's combat engine but inert unless that bot is the
-// leader and mid-pull; carries no multipliers, so it never alters normal combat.
+// leader and mid-pull, or a follower assisting the tank. Its ONE multiplier
+// (DungeonClearCombatMultiplier) touches only the stock "drop target" so the
+// flip-early assist can hold the combat engine; nothing else in combat is altered.
 class DungeonClearCombatStrategy : public Strategy
 {
 public:
@@ -32,6 +34,7 @@ public:
     std::string const getName() override { return "dungeon clear combat"; }
     uint32 GetType() const override { return STRATEGY_TYPE_COMBAT; }
     void InitTriggers(std::vector<TriggerNode*>& triggers) override;
+    void InitMultipliers(std::vector<Multiplier*>& multipliers) override;
 };
 
 #endif

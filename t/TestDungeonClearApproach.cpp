@@ -301,3 +301,82 @@ TEST(DungeonClearApproachTest, HopDoneOutranksJumpAndGlide)
     o.splineRunning = true;
     EXPECT_EQ(DecideApproach(o), V::RebuildAndYield);
 }
+
+// ---- tier-boundary fall-through sentinel (T2.2 single-observation staging)
+//
+// DungeonClearAdvanceAction::Execute assembles ONE observation across three
+// lazy stages (Tier A pre-path, Tier B path-level, Tier C hop-cluster) and uses
+// "DecideApproach(obs) == MoveToFallback" as the sentinel that no rung ABOVE the
+// current stage's fields fired, so it should defer to the next (costlier) stage.
+// These pin that contract: with the not-yet-computed fields at their struct
+// defaults, DecideApproach returns exactly the current tier's verdict or the
+// MoveToFallback fall-through — never a lower-tier verdict that needs the
+// uncomputed fields. If a future rung reordering broke this, the action would
+// mis-stage (e.g. skip the long-path build) — these tests catch it offline.
+namespace
+{
+    // The Tier-A observation: engage snapshot + thresholds only, every path/hop
+    // field at its struct default (pathReachable=true, nothing else set). This is
+    // exactly what Execute holds after FillStuckObs+FillPursuitObs, before it has
+    // built the long-path or fetched a hop.
+    Observation TierAOnly()
+    {
+        Observation o;
+        o.engageDist          = 100.0f;
+        o.engageRange         = 22.0f;
+        o.stuckTickLimit      = STUCK_TICK_LIMIT;
+        o.pursuitFailLimit    = PURSUIT_FAIL_LIMIT;
+        o.doneNotEngagedLimit = DONE_NOT_ENGAGED_LIMIT;
+        return o;  // haveSplineWindow stays false: the hop stage hasn't run
+    }
+}
+
+TEST(DungeonClearApproachTest, TierANoRungFallsThroughToSentinel)
+{
+    // Nothing wedged, nothing pursuable, path defaults reachable+on-path, hop
+    // fields default: the verdict must be the MoveToFallback sentinel so Execute
+    // proceeds to build the long-path (Tier B).
+    EXPECT_EQ(DecideApproach(TierAOnly()), V::MoveToFallback);
+}
+
+TEST(DungeonClearApproachTest, TierAStuckOwnsBeforeLongPath)
+{
+    Observation o = TierAOnly();
+    o.posStuckTicks = STUCK_TICK_LIMIT;
+    EXPECT_EQ(DecideApproach(o), V::StuckRecover);
+}
+
+TEST(DungeonClearApproachTest, TierAPursueOwnsBeforeLongPath)
+{
+    Observation o = TierAOnly();
+    o.canPursue = true;
+    o.pursuitFailTicks = 0;
+    EXPECT_EQ(DecideApproach(o), V::Pursue);
+}
+
+TEST(DungeonClearApproachTest, TierBReachableOnPathFallsThroughToSentinel)
+{
+    // Tier B computed reachability (reachable) and off-path (on-path) but no hop
+    // yet: still the sentinel, so Execute proceeds to NextHop (Tier C).
+    Observation o = TierAOnly();
+    o.pathReachable = true;
+    o.offPath = false;
+    EXPECT_EQ(DecideApproach(o), V::MoveToFallback);
+}
+
+TEST(DungeonClearApproachTest, TierBUnreachableOwnsBeforeHop)
+{
+    // An unreachable path always yields a non-sentinel verdict (here Stall, no
+    // water/async/far-poly), so Execute never fetches a hop on an unreachable tick.
+    Observation o = TierAOnly();
+    o.pathReachable = false;
+    EXPECT_NE(DecideApproach(o), V::MoveToFallback);
+    EXPECT_EQ(DecideApproach(o), V::Stall);
+}
+
+TEST(DungeonClearApproachTest, TierBOffPathOwnsBeforeHop)
+{
+    Observation o = TierAOnly();
+    o.offPath = true;
+    EXPECT_EQ(DecideApproach(o), V::OffPathRebuild);
+}

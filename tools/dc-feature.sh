@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
-# Start a new mod-dungeon-clear feature in an ISOLATED git worktree branched
-# from master. One feature = one worktree = one branch. Changes in one feature
-# can never bleed into another's working tree.
+# RETIRED — this script created git worktrees, and the worktree workflow has
+# been abandoned. The trees accumulated unmanaged and work went stale in
+# directories nobody revisited. Work in the main checkout instead:
 #
-#   tools/dc-feature.sh <feature-name> [feat|fix|refactor|tune|perf|test]
+#   git switch -c feat/<name> master
 #
-# Then work inside the printed directory, committing as you go. When done:
-#   git merge --no-ff <branch>
-#   git worktree remove <dir>
-#   git branch -d <branch>
+# See CLAUDE.md rule 2. The original implementation is kept below for history.
+cat >&2 <<'EOF'
+dc-feature.sh is RETIRED: the worktree workflow was abandoned.
+
+Work in the main checkout instead:
+  git switch -c feat/<name> master
+
+Commit before switching branches (CLAUDE.md rule 3).
+EOF
+exit 1
+
 set -euo pipefail
 
 name="${1:?usage: dc-feature.sh <feature-name> [kind]}"

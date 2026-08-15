@@ -56,6 +56,59 @@ namespace DcStrategyGate
         return Action::None;
     }
 
+    // The full per-bot reconciliation, composed from the kernel above plus the
+    // cross-engine hygiene the two-engine invariant leaves implicit.
+    //
+    // Each DC strategy belongs to exactly ONE engine ("dungeon clear" is
+    // STRATEGY_TYPE_NONCOMBAT, "dungeon clear combat" is STRATEGY_TYPE_COMBAT),
+    // but nothing enforces that: both live in Ctx::sharedStrategyContexts, which
+    // both engines consult, so `co +dungeon clear` (or the same name pasted into
+    // AiPlayerbot.CombatStrategies) instantiates the non-combat strategy inside
+    // the COMBAT engine. That is never correct, in a dungeon or out of one, and
+    // it is not a state this module can produce on its own.
+    //
+    // Left alone it is permanent and invisible. PlayerbotRepository::Save writes
+    // the combat strategy list to playerbots_db_store keyed on character GUID,
+    // and Load replays it AFTER ResetStrategies() has rebuilt the engines — so
+    // the bad row outlives config fixes, relogs, and resets. Meanwhile the whole
+    // DC non-combat relevance ladder (FollowTank 25 … StrandedRecovery 42, see
+    // DcRelevance.h) sits above the entire stock rotation band (ACTION_DEFAULT 5
+    // / ACTION_NORMAL 10 / ACTION_HIGH 20), so a bot carrying the stray follows
+    // and holds through every combat tick and never casts. That is the reported
+    // "DPS stands there doing nothing" (issue #18).
+    //
+    // So the strays are stripped unconditionally, independent of inDungeon. This
+    // does not rewrite the stored row — the gate never writes to the DB — but it
+    // runs on login, on map change and on the sweep, so an affected bot is clean
+    // for the whole session and the row heals on the next logout Save.
+    struct Plan
+    {
+        Action nonCombat;      // "dungeon clear" in the non-combat engine
+        Action combat;         // "dungeon clear combat" in the combat engine
+        bool stripStrayInCombat;     // "dungeon clear" found in the combat engine
+        bool stripStrayInNonCombat;  // "dungeon clear combat" found in non-combat
+        bool teardown;         // no DC strategy survives -> tear the run state down
+    };
+
+    constexpr Plan MakePlan(bool inDungeon, bool hasNonCombat, bool hasCombat,
+                            bool strayInCombat, bool strayInNonCombat)
+    {
+        Action const nonCombat = Decide(inDungeon, hasNonCombat);
+        Action const combat = Decide(inDungeon, hasCombat);
+
+        // "Will this bot still hold a DC strategy once the plan is applied?" —
+        // the teardown condition. Phrased on the resulting state rather than on
+        // "did anything get stripped" so that removing a stray from a bot that
+        // is legitimately mid-run inside a dungeon does NOT abort its run.
+        bool const keepsNonCombat = nonCombat == Action::Install || (nonCombat == Action::None && hasNonCombat);
+        bool const keepsCombat = combat == Action::Install || (combat == Action::None && hasCombat);
+        bool const anyChange = nonCombat != Action::None || combat != Action::None ||
+                               strayInCombat || strayInNonCombat;
+
+        return Plan{ nonCombat, combat, strayInCombat, strayInNonCombat,
+                     anyChange && !keepsNonCombat && !keepsCombat };
+    }
+
     // Bring one bot into compliance with the invariant. Idempotent and cheap when
     // already compliant (two HasStrategy reads). Safe to call on a non-bot
     // (no-ops) and on any player. MUST be called outside the bot's own engine

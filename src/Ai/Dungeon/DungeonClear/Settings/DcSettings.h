@@ -3,7 +3,24 @@
  *
  * Accessor for DungeonClear tunables. Resolution order on every read:
  *
- *     per-run override  ->  mod_dungeon_clear.conf  ->  registry default
+ *     per-run override
+ *       ->  conf "DungeonClear.<Key>.Heroic"   |  heroic runs only
+ *       ->  registry heroicVal                 |
+ *       ->  conf "DungeonClear.<Key>"
+ *       ->  registry default
+ *
+ * The two heroic steps apply only while the reading bot's map is a dungeon at
+ * DUNGEON_DIFFICULTY_HEROIC, and only for rows that opt in (a "<Key>.Heroic"
+ * conf line, or a non-sentinel `heroicVal` in the registry). A row that opts out
+ * — nearly all of them — resolves through the identical code path it did before
+ * the layer existed, on BOTH difficulties. Heroic trash is a different game from
+ * normal trash (every mob elite, packs that end a run), and the pull safety
+ * profile has to change with it; everything else stays one value.
+ *
+ * The override deliberately sits ABOVE the heroic layer and is itself
+ * difficulty-blind: a human who typed a value for this run means it for this
+ * run, and a default — however well chosen for heroic — must never overrule an
+ * explicit one.
  *
  * The per-run override layer is keyed by the run's leader-tank GUID
  * (DcLeaderSignal::FindLeaderTank), so each dungeon run can carry its own

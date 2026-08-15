@@ -8,6 +8,7 @@
 
 #include "Value.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
 
@@ -22,7 +23,7 @@ class DungeonClearLongPathValue : public ManualSetValue<ChunkedPathfinder::Resul
 {
 public:
     DungeonClearLongPathValue(PlayerbotAI* botAI)
-        : ManualSetValue<ChunkedPathfinder::Result&>(botAI, data, "dungeon clear long path")
+        : ManualSetValue<ChunkedPathfinder::Result&>(botAI, data, DcKey::LongPath)
     {
     }
 

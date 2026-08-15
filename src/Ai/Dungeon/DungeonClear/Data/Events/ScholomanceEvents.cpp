@@ -4,6 +4,7 @@
  */
 
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonRosterBuilders.h"
 
 // --- Scholomance (map 289) — Marduk & Vectus ROOM-AGGRO PRE-CLEAR ----------
 // Marduk Blackpool (10433) and Vectus (10432) are a linked pair (pulling either
@@ -24,7 +25,46 @@
 void RegisterScholomanceEvents(std::vector<DungeonEvent>& out)
 {
     out.push_back(EventBuilder(289, 1, "Clear the room (Marduk & Vectus)")
-                      .Conditional(3)
+                      .Conditional(&DcRoomAggroPreClearCondition)
                       .KillCreature(/*room trash*/ 0)
                       .Build());
+}
+
+// --- roster patch (relocated from BossRosterRegistry) --------------------
+void RegisterScholomanceRoster(std::vector<BossRosterPatch>& t)
+{
+    using namespace DcRoster;
+
+    // --- Scholomance (map 289) — Marduk & Vectus, one merged boss ---
+    // Marduk Blackpool (10433) and Vectus (10432) are two separate
+    // DungeonEncounters that share one room ~18yd apart and are wired
+    // together in SmartAI: each "On Aggro -> Set Data 3" and "On Data Set
+    // 3 -> Attack Start", so pulling EITHER pulls BOTH. They do not
+    // pre-aggro, but they stand in a chamber of ~32 Scholomance Students;
+    // engaging them before the room is clear (or AoE-waking one while
+    // clearing) drags the whole pile in.
+    //
+    // Collapse the pair into ONE boss, mirroring SM Cathedral
+    // (Mograine/Whitemane): drop BOTH derived entries and re-add a single
+    // "Marduk & Vectus" anchored on VECTUS's spawn (the boss nearest the
+    // student cluster — the close trash at ~14yd then falls inside the
+    // tracked boss's keep-away sphere and is left "coming with the boss").
+    // The merged boss re-uses Vectus's real entry (10432) so the engage
+    // pipeline drives a real creature, and inherits Vectus's own kill-bit
+    // via inheritCompletionFrom (resolved from the base list before the
+    // remove). Killing the linked pair flips that bit -> encounter done.
+    // Marduk stays in RoomAggroRegistry (partner exclusion) but off the
+    // roster, so the tank never routes to him separately. The room-aggro
+    // pre-clear event (ScholomanceEvents.cpp, condition 3) clears the
+    // students first.
+    {
+        BossRosterPatch p;
+        p.mapId = 289;
+        p.remove = { 10432, 10433 };
+        p.add = {
+            MakeBoss(10432, 289, "Marduk & Vectus",
+                     143.5f, 99.1f, 104.7f, /*completionFrom*/ 10432),
+        };
+        t.push_back(std::move(p));
+    }
 }

@@ -1,0 +1,168 @@
+# Test Deck configuration — the full reference.
+#
+# You do not have to write this by hand: `python3 -m testdeck setup` (which the
+# launcher runs for you on first start) inspects the host and writes a short
+# testdeck.toml with the handful of keys that actually differ. This file
+# documents everything you might want to change afterwards.
+#
+# Copy to testdeck.toml (next to this file, or ~/.config/testdeck.toml, or
+# /etc/testdeck.toml) and edit. Most installs only need [paths] base and a
+# [bridge] section.
+#
+# Paths on Windows: a backslash starts an escape inside a "quoted" string, so
+# either double them ("C:\\ac\\env\\dist") or use forward slashes
+# ("C:/ac/env/dist"), which Windows accepts everywhere.
+#
+# Check the result with:  python3 -m testdeck check
+
+[paths]
+# The workspace that contains your AzerothCore build. Every other path is
+# derived from it; uncomment one only if your layout differs.
+base = "/home/youruser/azerothcore"
+
+# Where the compiled server lives (bin/, etc/ inside it).
+#dist = "/home/youruser/azerothcore/env/dist"
+
+#worldserver_conf = "/home/youruser/azerothcore/env/dist/etc/worldserver.conf"
+
+# The directory the worldserver actually RUNS in — the one holding
+# worldserver(.exe). This is the key path on any install that is not the stock
+# Linux layout, because it is where the module writes the dc_* files the
+# launch, live and history panels read, and it is what the relative paths
+# inside worldserver.conf (LogsDir, DataDir) are relative to.
+#
+# Detected from the worldserver binary next to your config, so you only need
+# this if the server is started from somewhere else — a service with its own
+# working directory, or a launcher script that cd's first.
+#
+#   Linux (acore.sh):    /home/youruser/azerothcore/env/dist/bin
+#   Windows all-in-one:  C:/WoW/SingleCraft
+#server_root = "/home/youruser/azerothcore/env/dist/bin"
+
+# Where worldserver writes its *.log files. Follows LogsDir in
+# worldserver.conf, so a pack that ships LogsDir = "../logs/worldserver/"
+# needs nothing here.
+#log_dir = "/home/youruser/azerothcore/env/dist/bin"
+
+# The module .conf files. Found beside worldserver.conf (etc/modules/), and on
+# Windows also under <server_root>/configs/modules/, which is where the core
+# hardcodes them.
+#playerbots_conf = "/home/youruser/azerothcore/env/dist/etc/modules/playerbots.conf"
+#dungeonclear_conf = "/home/youruser/azerothcore/env/dist/etc/modules/mod_dungeon_clear.conf"
+
+# Client DBC files (Talent.dbc, TalentTab.dbc) — used to show talent specs in
+# the roster picker. Optional; the picker works without specs. Found via
+# DataDir in worldserver.conf.
+#dbc_dir = "/home/youruser/azerothcore/env/dist/bin/dbc"
+
+# Runtime state (saved rosters, session secret).
+# Default: ~/.local/share/ac-testdeck, or %LOCALAPPDATA%\\ac-testdeck on Windows.
+#data_dir = ""
+
+# The MySQL client Test Deck runs its queries through. Blank means: look on
+# PATH, then (on Windows) inside your AzerothCore tree and the usual
+# MySQL/MariaDB install directories — no Windows installer puts mysql.exe on
+# PATH, so this is the one key Windows hosts most often need.
+#mysql_bin = "C:/Program Files/MySQL/MySQL Server 8.0/bin/mysql.exe"
+
+[server]
+host = "0.0.0.0"
+port = 8790
+# Networks allowed to reach Test Deck at all (checked before login).
+# The default covers localhost + RFC1918 LANs. Use ["0.0.0.0/0", "::/0"] to
+# allow everything (not recommended without a reverse proxy doing TLS).
+#allowed_nets = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"]
+
+# Host NAMES this deck answers to, on top of localhost and any IP address.
+# You need this ONLY if testers reach Test Deck by a hostname — a reverse
+# proxy, or a DNS/hosts entry. Typing the address the startup banner prints
+# needs nothing here.
+#
+# Why names are opt-in: a hostile web page a tester visits can point a name it
+# owns at this server (DNS rebinding) and then talk to it as same-origin, from
+# a LAN address that allowed_nets is right to trust. Rebinding needs a NAME, so
+# requiring an address — or a name you listed — is what closes it.
+#allowed_hosts = ["testdeck.lan", "deck.example.com"]
+
+[auth]
+# Login uses real game accounts, verified against the auth database (SRP6).
+# The gmlevel is re-read from the database on every request (cached ~1 minute),
+# so `account set gmlevel <user> 0 -1` locks somebody out within the minute
+# rather than at session expiry. An active row in account_banned does the same.
+#
+# min_gmlevel: the GM level (account_access.gmlevel) required to log in.
+#              1 is a moderator; must be at least 1.
+# admin_gmlevel: required for everything that affects OTHER people — clearing
+#              shared run/plan history, deleting or overwriting another
+#              tester's saved roster, and running characters that belong to
+#              another account. Below it, a tester runs their own characters.
+# realm_id: match account_access rows with RealmID = -1 (all realms) or this id.
+min_gmlevel = 1
+admin_gmlevel = 3
+realm_id = -1
+# The deck serves plain HTTP on a LAN, so the session cookie is sniffable;
+# this is how long a stolen one stays useful. Raise it only behind TLS.
+session_hours = 12
+login_max_attempts = 5
+login_window_s = 300
+
+[bridge]
+# How Test Deck issues `.dc test …` commands to the worldserver.
+#
+#   soap    RECOMMENDED. Uses the worldserver's built-in SOAP interface.
+#           Works no matter how the worldserver is launched, needs no sudo.
+#           Setup: in worldserver.conf set
+#               SOAP.Enabled = 1
+#               SOAP.IP = "127.0.0.1"
+#               SOAP.Port = 7878
+#           and create a dedicated account with full GM level:
+#               account create tdbridge <password>
+#               account set gmlevel tdbridge 3 -1
+#           (SOAP requires administrator level; use a long random password.)
+#
+#           On Windows this is the ONLY usable transport.
+#
+#   screen  POSIX only. The worldserver runs inside a GNU screen session;
+#           commands are typed into it and the reply is read back from a
+#           screen hardcopy.
+#
+#   tmux    POSIX only. Same idea for a tmux pane.
+#
+# use_sudo: only for screen/tmux when the session belongs to ANOTHER user
+#           (e.g. worldserver runs as root). Requires the sudoers snippet:
+#           python3 -m testdeck sudoers | sudo tee /etc/sudoers.d/ac-testdeck
+type = "soap"
+soap_url = "http://127.0.0.1:7878/"
+soap_user = "tdbridge"
+# Prefer the environment variable so the password is not in this file:
+#   export TESTDECK_SOAP_PASS=...   (or Environment= in a systemd unit)
+#soap_pass = ""
+
+#type = "screen"
+#screen_session = "worldserver"
+#use_sudo = false
+
+#type = "tmux"
+#tmux_target = "worldserver"      # session name, or session:window.pane
+#use_sudo = false
+
+[realm]
+# How the header's realm orb decides the worldserver is up.
+#   auto     systemd when `unit` is set, otherwise a process-table check
+#   systemd  systemctl show <unit> (read-only, no privileges needed)
+#   process  pgrep -x <process_name>, or tasklist on Windows
+#   none     rely on sidecar-file freshness only
+#
+# On Windows use process_name = "worldserver.exe".
+status_check = "auto"
+#unit = "ac-worldserver"
+#process_name = "worldserver"
+
+#[dungeonclear]
+# Only needed if the module's sidecar files were renamed or relocated via the
+# DC_* env vars. A bare name is looked for in [paths] server_root; give the
+# full path if you moved one out of the worldserver's working directory.
+#testruns_file = "dc_testruns.jsonl"
+#testplans_file = "dc_testplans.jsonl"
+#live_file = "dc_testrun_live.json"
+#dungeons_file = "dc_test_dungeons.json"

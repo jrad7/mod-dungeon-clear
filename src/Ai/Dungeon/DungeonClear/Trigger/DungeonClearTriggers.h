@@ -8,6 +8,10 @@
 
 #include "Trigger.h"
 
+#include "Ai/Dungeon/DungeonClear/Util/DcProgressWatchdog.h"
+
+#include <cstdint>
+
 class PlayerbotAI;
 
 class DungeonClearIdleTrigger : public Trigger
@@ -39,7 +43,7 @@ public:
 
 // Leader-only, non-combat. Fires when an off-path CONDITIONAL event
 // (DungeonEventRegistry, EventActivation::Conditional) for this map is DUE — its
-// EventConditionRegistry predicate is true and it has not yet latched. Drives
+// bound activation predicate (DungeonEvent::condition) is true and it has not yet latched. Drives
 // DcRunEventAction, which runs the event's steps (walk to a lever/NPC, gossip,
 // wait for the gate to open). Relevance 31 — just above at-boss (30) — so a due
 // pre-boss gate (e.g. "free the prisoner to open the courtyard door") preempts
@@ -49,6 +53,28 @@ class DungeonClearEventDueTrigger : public Trigger
 {
 public:
     DungeonClearEventDueTrigger(PlayerbotAI* botAI) : Trigger(botAI, "dungeon clear event due", 1) {}
+    bool IsActive() override;
+};
+
+// COMBAT-engine sibling of DungeonClearEventDueTrigger. Fires only while the
+// leader IS in combat and the due conditional event is flagged
+// DungeonEvent::drivesInCombat — a continuous WAVE encounter whose event IS the
+// fight, so the driver must keep steering while the party is engaged.
+//
+// The non-combat copy stands down on bot->IsInCombat(), which is correct
+// everywhere the event's work happens BETWEEN pulls. It is fatal where the party
+// is in combat from the first pull to the last: the driver then runs only in the
+// shrinking gaps between waves and stops running entirely once the party falls
+// behind and combat stops dropping. Black Morass with two rifts open was exactly
+// that — nothing ever walked the tank to a portal to kill the rift keeper, so the
+// rifts never closed. See DungeonEvent::drivesInCombat.
+class DungeonClearEventDueCombatTrigger : public Trigger
+{
+public:
+    DungeonClearEventDueCombatTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear event due combat", 1)
+    {
+    }
     bool IsActive() override;
 };
 
@@ -87,6 +113,11 @@ public:
     bool IsActive() override;
 };
 
+// Fires the disable-on-death bailout when a same-map party member is dead AND
+// post-combat rez recovery is NOT viable (full wipe, no living rez class,
+// recovery timed out, or DungeonClear.PostCombatRez off). While recovery IS
+// viable the trigger stays silent — the rez-party rung below drives the
+// resurrection and the readiness gates hold the run. See DcRezRecovery.
 class DungeonClearPartyDiedTrigger : public Trigger
 {
 public:
@@ -94,10 +125,37 @@ public:
     bool IsActive() override;
 };
 
+// ALL bots (leader AND followers), non-combat. Fires when post-combat rez
+// recovery is in progress and THIS bot is the elected rezzer (deterministic
+// from group order: first living rez-class bot, healers first — every member
+// computes the same answer, so exactly one bot fires). Drives
+// DungeonClearRezPartyAction: walk to the corpse, cast the class rez. Inert
+// for off/paused runs, with no deaths, when a stock class-strategy rez already
+// raised everyone, or when only the human can rez (the hold + prompt path).
+class DungeonClearRezPartyTrigger : public Trigger
+{
+public:
+    DungeonClearRezPartyTrigger(PlayerbotAI* botAI) : Trigger(botAI, "dungeon clear rez party", 1) {}
+    bool IsActive() override;
+};
+
 class DungeonClearAllClearedTrigger : public Trigger
 {
 public:
     DungeonClearAllClearedTrigger(PlayerbotAI* botAI) : Trigger(botAI, "dungeon clear all cleared", 1) {}
+    bool IsActive() override;
+};
+
+// Stranded-member recovery failsafe. Fires ONLY on the leader tank when the run
+// has shown no progress for DungeonClear.StrandedRecoveryNoProgressSecs while a
+// bot party member is stuck out of range (fell under the world / wedged in
+// geometry). DcStrandedRecovery::Evaluate owns the no-progress clock (this is its
+// sole update site) and returns true only when a teleport should fire this tick;
+// the paired DungeonClearRecoverStrandedAction relocates the strays to the tank.
+class DungeonClearRecoverStrandedTrigger : public Trigger
+{
+public:
+    DungeonClearRecoverStrandedTrigger(PlayerbotAI* botAI) : Trigger(botAI, "dungeon clear recover stranded", 1) {}
     bool IsActive() override;
 };
 
@@ -240,6 +298,13 @@ public:
 // in to grab aggro, and (on the combat engine) drags the pack back. Sits above
 // engage-trash so the pull preempts the normal walk-in; trash-only — never
 // preempts the at-boss engage.
+//
+// Two things widen the "mode is on" gate, both because the decision to pull was not
+// the mode's to make: a BossPullbackRegistry drag (`bossPullback`), and a
+// ScriptedPullRegistry stage already IN FLIGHT. The second is a cleanup guarantee,
+// not a licence — a stage's mode is forced on only while its row is still DUE, so it
+// can drop the moment the pack dies, taking the Engage cleanup that unlatches the
+// stage down with it. Scoped to phase != Idle so it can never open the start path.
 class DungeonClearPullTrigger : public Trigger
 {
 public:
@@ -343,16 +408,110 @@ public:
     bool IsActive() override;
 };
 
-// Follower-only, COMBAT engine. Keeps the party grouped on the leader tank during
-// ANY fight (not just an advanced-pull camp) once the leash has loosened: fires
-// while DC is active on the group, this bot is a non-leader follower in combat,
-// and it has drifted beyond DungeonClear.CombatRegroupDistance from the tank.
-// Drives DungeonClearRegroupCombatAction. The healer out-of-LOS case it used to
-// also cover is now owned by DungeonClearHealRepositionTrigger (which aims at the
-// hurt heal target, not just the tank, and runs in both engines). Deliberately
-// INERT while the party is held passive at an advanced-pull camp (GetLeaderCamp-
-// Hold passive) — the camp/assist actions own positioning there. Gated by
-// DungeonClear.CombatRegroup.
+// ANY DC party member (leader OR follower), BOTH engines. Phantom-combat escape
+// hatch. A member can be left FLAGGED in combat by a mob that spawned far across the
+// map or behind a gate (a proximity/gate event spawn) and tagged it: the core combat
+// reference never drops because the holder is unreachable, and DC's own gates that
+// key off "someone is in combat" (the fight-assist arm, the party-engaged latch)
+// then spin forever — a hard deadlock a `dc off`/`on` cannot clear because the flag
+// lives in the core CombatManager, not in DC. This trigger fires only when the bot is
+// in combat but nothing is fightable — nothing meleeing it, no victim, and EVERY unit
+// holding it in combat is unreachable-by-path, evading, forbidden by its own AI from
+// attacking us, or REACHABLE BUT NOT COMING — sustained for
+// DungeonClear.StuckCombatTimeout seconds (long by default so a scripted encounter
+// that intentionally holds combat is never mistaken for a stuck flag). Keying on
+// REACHABILITY (not distance) is the safety property: a fleeing or kiting party's
+// pursuers are always path-reachable, so it can never fire there; a combat forced by
+// a script with no unit reference is likewise never touched.
+//
+// The "reachable but not coming" arm is the S1487 addition. In an instance a creature
+// never leashes (the dungeon short-circuit in CanCreatureAttack), so a mob that tagged
+// the party and then stopped keeps its combat reference alive from wherever it stands
+// — alive, non-evading, path-reachable, allowed to attack, and completely inert. That
+// read as a real fight, so this hatch stood down while every DC gate keyed off "someone
+// is in combat" spun. It is bounded by CLOSING DISTANCE, not by distance or time alone:
+// a holder inside DC_ENGAGE_RANGE is a fight whatever the numbers say, and one that is
+// improving its closest-ever distance to us is chasing. Only a holder that is far AND
+// has stopped closing counts as stale. Drives
+// DungeonClearBreakStuckCombatAction, which force-clears combat + threat (the same
+// effect as a GM `.combatstop`). Inert the instant anything becomes fightable, outside
+// a live/unpaused DC run, and — deliberately — in any RAID zone, where an errant
+// combat drop could reset a boss for the whole raid (the deadlock this recovers is a
+// 5-man problem). Verdict is the pure DungeonClearMath::IsPhantomCombat +
+// ShouldBreakStuckCombat kernels.
+//
+// Registered in BOTH engines, and the NON-combat registration is the load-bearing
+// one. Engine transitions are action-driven, not derived from IsInCombat: stock
+// `drop target` (relevance 99) moves a bot to BOT_STATE_NON_COMBAT without clearing
+// the core flag, and nothing moves it back while a DC run suppresses the stock
+// attack/pull actions that call ChangeEngine(BOT_STATE_COMBAT). A bot in that state
+// is flagged with every non-combat rung bailing on IsInCombat() and every combat rung
+// out of reach — which, while this hatch was combat-only, included the hatch itself.
+// See DungeonClearStrategy for the live case.
+class DungeonClearBreakStuckCombatTrigger : public Trigger
+{
+public:
+    DungeonClearBreakStuckCombatTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear break stuck combat", 1)
+    {
+    }
+    bool IsActive() override;
+
+private:
+    // Streak clock owned per-bot (the context creates one trigger object per bot):
+    // getMSTime the phantom-combat state was first observed this streak, 0 = not
+    // streaking. Reset to 0 the instant anything becomes fightable. The action reads
+    // nothing from here — the force-clear is stateless.
+    std::uint32_t stuckCombatSinceMs = 0;
+
+    // Closing-distance tracker over the NEAREST legitimate combat holder. Reachability
+    // proves a holder COULD come; this proves whether it IS coming. Re-armed only when
+    // there is nothing to measure (out of combat, a real fight, no legitimate holder),
+    // never on a tick where the holder merely happened to close — see IsActive.
+    DcProgressWatchdog holderCloseWatch;
+};
+
+// LEADER-only, COMBAT engine. The combat-side rung of the KillCreature-engage
+// objective (Shattered Halls' stealthed Shattered Hand Assassins). A stealthed
+// mob can Sap the tank: the sap flags the party into combat AND the assassin stays
+// stealthed, so once the incapacitate wears off stock combat has no detectable
+// victim and the run wedges "in combat, nothing to hit". The non-combat objective
+// driver (DcObjectiveArriveAction's engage branch) cannot run then — combat owns
+// the engine — so this fires it from the combat side. Active only when: DC leader
+// on a live/unpaused run, in combat, an active KillCreature-ENGAGE objective step
+// (DungeonEventExecutor::ActiveEngageStep), AND a live creature of that step's
+// entry sits nearby, REACHABLE, but this bot canNOT see/detect it — the exact
+// stealthed-sapper deadlock signature. Drives DcObjectiveEngageCombatAction, which
+// walks the tank onto the assassin by ENTRY and Attacks it (breaking stealth on the
+// first swing). Inert the instant the target becomes detectable, handing the kill
+// back to stock combat.
+class DungeonClearObjectiveEngageCombatTrigger : public Trigger
+{
+public:
+    DungeonClearObjectiveEngageCombatTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear objective engage combat", 1)
+    {
+    }
+    bool IsActive() override;
+};
+
+// Follower-only, COMBAT engine. A CONTRIBUTION-GATED reconnector (Option B): it no
+// longer tethers on distance. It fires only when a follower in combat has no useful
+// work it can do from where it stands — a DPS with an empty LOS attacker list, or a
+// healer parked where it could not heal the tank when damage starts (nobody hurt
+// yet) — and drives DungeonClearRegroupCombatAction to a role-correct standoff point
+// with LOS on the fight, never onto the tank's cell. The verdict is the pure
+// DcRegroupDecision::DecideCombatRegroup kernel; this trigger gathers the game-state
+// reads, then layers debounce (predicate must hold DC_REGROUP_DEBOUNCE_MS before
+// firing) + a latch (keep firing until it clears) + a post-fire cooldown
+// (DungeonClear.CombatRegroupCooldown) so it cannot flap on an LOS flicker.
+// DungeonClear.CombatRegroupDistance survives as a HARD OUTER TETHER: beyond it the
+// bot reconnects regardless of the contribution test, bypassing debounce/cooldown
+// (the drifted-into-nowhere emergency path). The hurt-heal-target case is owned by
+// DungeonClearHealRepositionTrigger (rel 41); this stands down whenever it holds.
+// Deliberately INERT while the party is held passive at an advanced-pull camp
+// (GetLeaderCampHold passive) — the camp/assist actions own positioning there.
+// Gated by DungeonClear.CombatRegroup.
 class DungeonClearRegroupCombatTrigger : public Trigger
 {
 public:
@@ -361,6 +520,13 @@ public:
     {
     }
     bool IsActive() override;
+
+private:
+    // Flap control. Per-bot (the context creates one trigger object per bot); the
+    // action never reads these — the move is stateless and re-derives everything.
+    uint32 _pendingSince  = 0;  // first getMSTime the contribution predicate held (0 = not pending)
+    uint32 _cooldownUntil = 0;  // no non-emergency re-fire before this getMSTime
+    bool   _latched       = false;  // currently firing: keep firing until the predicate clears
 };
 
 // Healer-only, BOTH engines. The real fix for the long-standing "healer stops
@@ -379,6 +545,26 @@ class DungeonClearHealRepositionTrigger : public Trigger
 public:
     DungeonClearHealRepositionTrigger(PlayerbotAI* botAI)
         : Trigger(botAI, "dungeon clear heal reposition", 1)
+    {
+    }
+    bool IsActive() override;
+};
+
+// ANY role, BOTH engines. Fires when the bot is standing inside the pulse of an
+// active-vacate DcHazardRegistry emitter it cannot fight — the Arcatraz
+// "Destroyed Sentinel" (21761) summoned at a Sentinel's corpse, NOT_SELECTABLE,
+// pulsing 15yd/1s until it despawns. Drives DungeonClearHazardVacateAction to
+// clear the pulse; once out, normal driving resumes and the party advances past
+// the corpse (it does NOT hold at the rim for the summon's whole lifetime — see
+// the band note in DcHazard.h). No combat gate (the pulse ticks after the kill,
+// often out of combat) and no role exemption (the summon can't be tanked). Inert
+// on maps with no emitters, while CC'd/rooted (can't move), and when
+// DungeonClear.HazardVacate is off. See DcHazard::NearestVacate.
+class DungeonClearHazardVacateTrigger : public Trigger
+{
+public:
+    DungeonClearHazardVacateTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear hazard vacate", 1)
     {
     }
     bool IsActive() override;

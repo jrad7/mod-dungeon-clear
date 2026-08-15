@@ -56,6 +56,16 @@ namespace DcNavHarness
     RouteResult Route(dtNavMesh const* mesh, uint32_t mapId,
                       float sx, float sy, float sz,
                       float tx, float ty, float tz);
+
+    // Snap a WoW-space point to the nearest navmesh poly, using the same
+    // {y,z,x} Detour coordinate order as BuildCoreFromMesh and a permissive
+    // include filter. `out` receives the snapped WoW-space stand position.
+    // Returns false if no poly lies within (hExtent, vExtent, hExtent) of the
+    // point — i.e. the coordinate is off the navmesh. Used to validate/correct
+    // authored anchor + teleport coordinates against the real mesh.
+    bool NearestPoint(dtNavMesh const* mesh,
+                      float x, float y, float z,
+                      float hExtent, float vExtent, G3D::Vector3& out);
 }
 
 #endif  // _DC_NAV_HARNESS_H

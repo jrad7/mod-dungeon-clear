@@ -11,6 +11,7 @@
 class AiObjectContext;
 class Player;
 struct DungeonBossInfo;
+struct ScriptedPullStage;
 
 // Within-tick memo of a few predicates the DC trigger ladder evaluates more than
 // once per engine tick (each internally a group walk / geometry pass / pathfinder
@@ -22,6 +23,12 @@ struct DungeonBossInfo;
 //   - DcPartyState::IsBetweenPullsReady — at-boss / blocking-trash / room-trash /
 //     stalled / pull triggers (strict, requireNoLoot=true), and the advance/event
 //     actions (loose, requireNoLoot=false). Each is a full party walk.
+//   - ScriptedPullRegistry::DueStage — the pull-target value, the effective
+//     pull-mode value, the pull trigger's fight-in-place exception and the pull
+//     action's commit branch all ask for it (4+ calls), and each miss runs one
+//     entry-filtered volume scan PER STAGE with a reachability probe on every
+//     candidate. Cheap-gated to the one map and the arm radius, but inside that
+//     window it is the most expensive thing in the ladder.
 //
 // This is NOT a cross-tick cache (that was the door-verdict staleness-bug class):
 // the 50ms window can never span two AI ticks (>=100ms apart), so it deduplicates
@@ -34,6 +41,9 @@ struct DcTickMemo
     std::int8_t atBossEngage = -1;
     std::int8_t betweenPullsReadyLoose = -1;   // requireNoLoot == false
     std::int8_t betweenPullsReadyStrict = -1;  // requireNoLoot == true
+    // Due scripted-pull stage ORDER: -2 unset, -1 none due, >= 0 the stage's order.
+    // (-1 is a meaningful answer here, so the "unset" sentinel has to be distinct.)
+    std::int32_t scriptedStage = -2;
 
     static constexpr std::uint32_t kMemoWindowMs = 50;
 
@@ -57,6 +67,11 @@ public:
                              DungeonBossInfo const& next);
     static bool BetweenPullsReady(Player* bot, AiObjectContext* ctx,
                                   bool requireNoLoot);
+    // The ScriptedPullRegistry stage due this tick, or nullptr. Call this rather
+    // than ScriptedPullRegistry::DueStage from anything on the per-tick path; the
+    // registry entry point is the uncached one. (Rows are static table entries, so
+    // the pointer is stable for the process lifetime.)
+    static ScriptedPullStage const* ScriptedStage(Player* bot, AiObjectContext* ctx);
 };
 
 #endif  // _DC_TICK_MEMO_H

@@ -70,6 +70,17 @@ namespace DcActionShared
     // TryTake before this fires, and far above any real build time.
     inline constexpr uint32 DC_ASYNC_PATH_PENDING_TIMEOUT_MS = 5 * 1000;
 
+    // How far the bot may have moved from the position an async path job was
+    // SUBMITTED from before the finished result is stale-discarded at drain
+    // instead of installed. A pending window is sub-second, so honest movement
+    // stays a few yards; only a relocation the polyline can't know about — a
+    // TeleportParty landing, an event repositioning the leader — exceeds this.
+    // Installing such a route re-enters it with a straight opening spline back
+    // toward the pre-relocation start and the tank sprints the wrong way (the
+    // post-Brazen wrong-direction run in Old Hillsbrad). Discarding falls
+    // through to an immediate resubmit from the live position.
+    inline constexpr float DC_ASYNC_PATH_START_DRIFT_MAX = 40.0f;
+
     // Commit-timeout for the loot yield, shared by the tank's advance yield and
     // the follower's follow-tank yield. After a pull the tank holds until the
     // WHOLE party has finished looting (see the advance loot-yield block), and
@@ -136,8 +147,16 @@ namespace DcActionShared
     // nullopt. Used by the engage walk-in (EngageDirect) and the advanced pull.
     std::optional<ResolvedPullSpell> ResolvePullSpell(PlayerbotAI* botAI, Player* bot);
 
+    // The one success reason: DisableDungeonClear called with exactly this
+    // string means the run ended because every boss died. Shared so the
+    // all-cleared action and the `.dc test` harness classifier can never
+    // drift apart on the wording.
+    inline constexpr char kReasonAllCleared[] = "All bosses cleared!";
+
     // Tear the run down: clears every "dungeon clear *" value and announces the
-    // reason. Mode goes disabled.
+    // reason. Mode goes disabled. Every run-end path funnels through here, so
+    // this is also where the `.dc test` harness observes the run ending (see
+    // DcTestRunManager::OnRunDisabled — a no-op outside a monitored test run).
     void DisableDungeonClear(PlayerbotAI* botAI, std::string const& reason);
 
     // Mode stays enabled; set a stall reason the fallback trigger / `dc status`
@@ -161,6 +180,64 @@ namespace DcActionShared
 
     // Turn the bot to face `unit` if it is not already roughly facing it.
     void DcFaceIfNeeded(Player* bot, Unit* unit);
+
+    // Is the bot standing in a damaging ground effect right now?
+    //
+    // Every rung that RECALLS a bot to a fixed point has to ask this first, because a
+    // recall and a step-out are two correct rungs that can want incompatible places:
+    // the step-out has to leave the effect, the recall has to return to the camp, and
+    // when the effect is ON the camp neither can yield. The recall is the one that
+    // gives, on the simple grounds that the step-out is answering damage.
+    //
+    // Reads the stock "area debuff" value, which returns the negative dynamic-object
+    // aura the bot CURRENTLY HAS — so it is false the moment the bot is clear, and
+    // the recall re-arms by itself one tick later.
+    bool DcInGroundEffect(AiObjectContext* ctx);
+
+    // A PULL MANEUVER OWNS THE TANK — the ACTION-side half of the stand-down the
+    // route triggers (DungeonClearIdleTrigger / DungeonClearAtBossTrigger) already
+    // perform. Call it at the top of any rung whose destination is the ROUTE (the
+    // next boss), before it issues movement; it returns true when that rung must
+    // stand down, and logs why.
+    //
+    // It has to be re-asked here because a trigger cannot un-queue an action. The
+    // engine's queue is a member and survives ticks: a basket is pushed when its
+    // trigger fires and is consumed only when its action is finally popped —
+    // which, while a pull maneuver runs, it is not. The pull rung (relevance 35)
+    // executes and BREAKS the action loop every tick, so a route basket pushed on
+    // the tick the pull committed just sits there, outliving the trigger that
+    // pushed it.
+    //
+    // It gets its turn on the first tick BOTH pull rungs go dark, and there is
+    // exactly one such tick per pull: the one right after a RANGED tag. Combat has
+    // started, so DungeonClearPullTrigger (non-combat) returns !IsInCombat() ==
+    // false; the bot has not been flipped onto the combat engine yet (engine
+    // transitions are action-driven, not derived from the combat flag), so
+    // DungeonClearPullManeuverTrigger cannot run either. The stale route basket is
+    // then the top live rung, and what it does with the tick is drive the tank at
+    // the boss — forward into the room the pull is dragging out of.
+    //
+    // Live (tr-20260803-194800-14, Magisters' Terrace, Selin's east guard pack):
+    //   19:52:08 advanced-pull: ranged tag spell 16857 at 28.8yd
+    //   19:52:08 advance window: leg 0 violates bystander sphere ... (r=28.1)
+    //            -> too close to honour, gliding 10 -> 10 pts
+    //   19:52:08 spline issued: 10 pts, 37.3yd, delay=5000ms,
+    //            from=(210.9,9.1,-2.8) to=(242.7,19.7,-0.8)
+    //   19:52:09 advanced-pull: aggro confirmed at 44.7yd from camp -> dragging
+    //   19:52:15 scripted-pull: drag lost ground to camp (26.2yd vs best 22.6)
+    //            — something else is driving the tank
+    // The window it glided through was KNOWN to cross a bystander's aggro sphere
+    // and was honoured anyway ("too close to honour") — which is what wakes the
+    // packs the plan exists to leave alone, and is the reported "runs forward into
+    // the room aggroing everything". Exactly ONE advance execution, on exactly the
+    // tick both pull rungs were dark: the signature of a queued basket, not of a
+    // trigger passing. S1448 closed the trigger and the same spline came back,
+    // because the trigger was never the way in.
+    //
+    // Mirrors BOTH of the triggers' gates, not just the scripted one: the tag ->
+    // drag handoff window is identical for an ordinary advanced pull and for a
+    // pull-back, and so is the damage a boss-bound glide does inside it.
+    bool PullOwnsTheTank(Player* bot, AiObjectContext* ctx, char const* rung);
 }  // namespace DcActionShared
 
 #endif

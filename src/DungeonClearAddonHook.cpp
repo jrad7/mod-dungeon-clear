@@ -168,17 +168,27 @@ public:
             PLAYERHOOK_ON_LOGOUT
         }) {}
 
-    // True for the addon's client->server control messages, which ride in as a
-    // party/raid addon chat line of the form "DC\tCMD\t<sub>[\t<param>]". Shared
-    // by the parse hook (OnPlayerBeforeSendChatMessage, which acts on them) and
-    // the relay-block hook (OnPlayerCanUseChat, which stops the core forwarding
+    // True for the addon's client->server control messages, which ride in as an
+    // addon chat line of the form "DC\tCMD\t<sub>[\t<param>]". Shared by the
+    // parse hook (OnPlayerBeforeSendChatMessage, which acts on them) and the
+    // relay-block hook (OnPlayerCanUseChat, which stops the core forwarding
     // them to the rest of the group).
+    //
+    // WHISPER is the solo transport. The addon's normal channel is PARTY/RAID,
+    // which simply does not exist for a player with no group — so a GM watching
+    // a test run from outside the bot party could not press any button at all,
+    // spectate included, even though the spectator camera itself has never had
+    // a group requirement. A whisper to oneself is the standard addon-message
+    // channel for that case. The server dispatch self-authorizes either way
+    // (bot commands still need a tank bot in the sender's group and say so),
+    // so accepting the extra channel grants no new authority.
     static bool IsDcAddonCommand(uint32 type, uint32 lang, std::string const& msg)
     {
         if (lang != LANG_ADDON)
             return false;
         if (type != CHAT_MSG_PARTY && type != CHAT_MSG_PARTY_LEADER &&
-            type != CHAT_MSG_RAID && type != CHAT_MSG_RAID_LEADER)
+            type != CHAT_MSG_RAID && type != CHAT_MSG_RAID_LEADER &&
+            type != CHAT_MSG_WHISPER)
             return false;
         // "DC\t" (3) + "CMD\t" (4) = 7-byte prefix.
         return msg.compare(0, 7, "DC\tCMD\t") == 0;
@@ -243,12 +253,22 @@ public:
             return;
         }
 
-        // Spectator free-camera: acts on the sending player directly (session
-        // plumbing, not a tank-bot action) — never dispatched.
+        // Spectator camera: acts on the sending player directly (session
+        // plumbing, not a tank-bot action) — never dispatched. Bare = the
+        // free-flying camera; "follow" rides the run's tank instead.
         if (subCmd == "spectate")
         {
             std::string whyNot;
-            if (!DcSpectator::Toggle(player, &whyNot))
+            bool ok = true;
+            if (param == "follow")
+                ok = DcSpectator::ToggleFollow(player, nullptr, &whyNot);
+            else if (param == "next")
+                ok = DcSpectator::CycleFollow(player, +1, &whyNot);
+            else if (param == "prev")
+                ok = DcSpectator::CycleFollow(player, -1, &whyNot);
+            else
+                ok = DcSpectator::Toggle(player, &whyNot);
+            if (!ok)
                 SendAddonError(player, whyNot);
             return;
         }

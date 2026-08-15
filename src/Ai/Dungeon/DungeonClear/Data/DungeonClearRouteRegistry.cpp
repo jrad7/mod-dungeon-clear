@@ -22,6 +22,11 @@ std::vector<WaypointHint> const* DungeonClearRouteRegistry::Get(uint32 mapId, Di
 {
     auto const& s = Store();
     auto it = s.find(Key{mapId, difficulty, bossEntry});
+    // Heroic shares the normal dungeon's geometry, and the hand-authored routes
+    // are registered under normal — fall back so a heroic run still gets its
+    // waypoint hints. A difficulty-specific row, when one exists, wins.
+    if (it == s.end() && difficulty != DUNGEON_DIFFICULTY_NORMAL)
+        it = s.find(Key{mapId, DUNGEON_DIFFICULTY_NORMAL, bossEntry});
     if (it == s.end())
         return nullptr;
     return &it->second;

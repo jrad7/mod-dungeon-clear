@@ -97,6 +97,45 @@ namespace
         { 650, 35571, 100.0f, {} }, // Runok Wildmane
         { 650, 35572, 100.0f, {} }, // Mokra the Skullcrusher
         { 650, 35617, 100.0f, {} }, // Visceri
+
+        // NOTE: The Mechanar (554) Mechano-Lord Capacitus had a room-aggro entry
+        // here to pre-clear his SE Driller pack, back when the clear reached him
+        // LAST on floor 1 (up the corridor from the dead Iron-Hand), which put that
+        // pack right on the pull approach. The boss order now runs Gyro-Kill ->
+        // Capacitus -> Iron-Hand, so the tank approaches the pit from the NW and the
+        // SE pack falls on the post-Capacitus walk down to Iron-Hand — plain trash-
+        // clear handles it once the boss is dead. Entry removed (see MechanarEvents).
+
+        // The Mechanar (554) Nethermancer Sepethrea (floor 2). Her chamber holds
+        // THREE elite trash groups the party must clear before the pull, and all
+        // three should be dragged back WEST toward the entrance (the elevator
+        // landing / Nethermancer door at ~x268) — NOT fought in place, because she
+        // summons roaming Raging Flames and the fight wants the open floor. From the
+        // world-DB spawns + a navmesh probe (TestMechanarElevatorProbe,
+        // MechanarSepethreaRoomProbe):
+        //   * Pack A  — 2 Astromage + 2 Centurion, ~(273,-23), 60-67yd from her.
+        //   * Robots  — 2 Tempest-Forge Destroyers (one stationary, one roaming),
+        //               ~(291,29) & (294,-15), 39-43yd out.
+        //   * Pack B  — 2 Centurion + 2 Astromage, ~(309,13), only 17-19yd out —
+        //               right on her ~18yd aggro line.
+        // radius 70 covers the farthest (Pack A at 67yd); the whole set reads hostile
+        // so no whitelist is needed. The catch is Pack B: it sits INSIDE her ~28yd
+        // exclusion sphere, so the ordinary room-clear would treat it as "comes with
+        // the boss" and leave it up. pullOutRadius 14 shrinks the room-trash exclusion
+        // to 14yd (below Pack B's 17yd), KEEPING Pack B as clearable room trash, and
+        // — because a non-zero pullOutRadius also forces advanced pull-to-camp — the
+        // tank drags Pack B out from ~35yd west instead of meleeing it in place. See
+        // RoomAggroBoss::pullOutRadius for the coupling that makes this safe.
+        //
+        // skirtRadius 40 WIDENS the fight standoff (her raw ~28yd sphere is too tight):
+        // Pack B sits only 17yd out, so a camp cleared to the generic ~25yd from her
+        // still landed the kill on top of her aggro/CallForHelp and woke her while the
+        // party was still on the trash. The wider skirt drags Pack B's camp out toward
+        // the ~x268 entrance landing before the fight, clear of her and of the open
+        // floor her Raging Flames roam. It does NOT reclassify Pack B (membership uses
+        // pullOutRadius 14, not the skirt).
+        { 554, 19221, 70.0f, {}, false, 0.0f, 0.0f, /*pullOutRadius*/ 14.0f,
+          /*skirtRadius*/ 40.0f },
     };
 }
 
@@ -106,6 +145,12 @@ RoomAggroBoss const* RoomAggroRegistry::Find(uint32 mapId, uint32 bossEntry)
         if (b.mapId == mapId && b.bossEntry == bossEntry)
             return &b;
     return nullptr;
+}
+
+float RoomAggroRegistry::SkirtOverride(uint32 mapId, uint32 bossEntry)
+{
+    RoomAggroBoss const* b = Find(mapId, bossEntry);
+    return b ? b->skirtRadius : 0.0f;
 }
 
 bool RoomAggroRegistry::IsMemberEntry(RoomAggroBoss const& boss, uint32 entry)

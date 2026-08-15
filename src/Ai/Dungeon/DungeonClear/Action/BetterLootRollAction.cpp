@@ -4,6 +4,9 @@
 
 #include "BetterLootRollAction.h"
 
+#include <utility>
+#include <vector>
+
 #include "Group.h"
 #include "ObjectMgr.h"
 #include "PlayerbotAIConfig.h"
@@ -11,6 +14,7 @@
 #include "RandomItemMgr.h"
 #include "StatsWeightCalculator.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPlayerbotCompat.h"
 
 namespace
 {
@@ -60,25 +64,33 @@ bool DungeonClearBetterLootRollAction::Execute(Event event)
     if (!DcSettings::GetBool(bot, "BetterLootRolling"))
         return LootRollAction::Execute(event);
 
+    // The self-bot suppression isUseful() already applies, repeated here
+    // because the engine's queued basket outlives the trigger that filled it:
+    // an action queued while it was useful still runs after isUseful() would
+    // refuse it, so a gate that exists only in isUseful() is not a gate.
+    if (DcPlayerbotCompat::IsSelfBot(bot))
+        return false;
+
     Group* group = bot->GetGroup();
     if (!group)
         return false;
 
-    std::vector<Roll*> rolls = group->GetRolls();
-    for (Roll*& roll : rolls)
+    // Decide every pending roll first and vote afterwards. A vote that
+    // completes a roll destroys it — Group::CountRollVote calls CountTheRoll,
+    // which erases the entry and deletes the Roll — so no Roll* may be read
+    // after any vote has been cast.
+    std::vector<std::pair<ObjectGuid, RollVote>> decided;
+    for (Roll const* roll : group->GetRolls())
     {
         auto voteItr = roll->playerVote.find(bot->GetGUID());
         if (voteItr == roll->playerVote.end() || voteItr->second != NOT_EMITED_YET)
             continue;
 
         ItemTemplate const* proto = sObjectMgr->GetItemTemplate(roll->itemid);
-        if (!proto)
+        // Anything that is not the over-level case is stock's to answer, and
+        // the pass below answers it — leave the vote unemitted for now.
+        if (!proto || !IsFutureWearable(proto))
             continue;
-
-        // Stock handles one pending roll per Execute, always the first; if
-        // that first roll is not the over-level case, defer it wholesale.
-        if (!IsFutureWearable(proto))
-            return LootRollAction::Execute(event);
 
         int32 randomProperty = 0;
         if (roll->itemRandomPropId)
@@ -103,17 +115,26 @@ bool DungeonClearBetterLootRollAction::Execute(Event event)
         {
             case MASTER_LOOT:
             case FREE_FOR_ALL:
-                group->CountRollVote(bot->GetGUID(), roll->itemGUID, PASS);
+                vote = PASS;
                 break;
             default:
-                group->CountRollVote(bot->GetGUID(), roll->itemGUID, vote);
                 break;
         }
-        // One item at a time
-        return true;
+        decided.emplace_back(roll->itemGUID, vote);
     }
 
-    return false;
+    for (auto const& [itemGuid, vote] : decided)
+        group->CountRollVote(bot->GetGUID(), itemGuid, vote);
+
+    // Then stock, for every roll this pass left alone. Upstream #2496 turned
+    // that from one item per Execute into all of them, and matching it is the
+    // point: a five-item boss drop used to hold the action slot for five ticks
+    // (this action runs off a per-tick trigger, not stock's random one), which
+    // is exactly the starvation the one-action-per-tick rule warns about.
+    // The rolls voted above are skipped there — CountRollVote has moved them
+    // off NOT_EMITED_YET.
+    bool const stockVoted = LootRollAction::Execute(event);
+    return !decided.empty() || stockVoted;
 }
 
 bool DungeonClearBetterLootRollAction::IsFutureWearable(ItemTemplate const* proto) const

@@ -58,9 +58,18 @@ jobs:
         with:
           path: modules/mod-dungeon-clear
 
-      # 2. Cheap, build-free gate first.
+      # 2. Cheap, build-free gates first.
       - name: Determinism lint
         run: bash modules/mod-dungeon-clear/tools/check_determinism.sh
+
+      - name: Config-read lint
+        run: python3 modules/mod-dungeon-clear/tools/check_config_reads.py
+
+      # Every build we run is clang-on-glibc, so MSVC-only breakage (M_PI and
+      # friends) ships undetected. windows-smoke.yml compiles for real; this is
+      # the one-second version that fails the PR before anyone waits on it.
+      - name: MSVC portability lint
+        run: python3 modules/mod-dungeon-clear/tools/check_msvc_portability.py
 
       # 3. Build the core deps + the test target. ccache makes repeat runs cheap.
       - name: Install build dependencies

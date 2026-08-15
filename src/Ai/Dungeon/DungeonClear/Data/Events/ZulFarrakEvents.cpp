@@ -4,6 +4,11 @@
  */
 
 #include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonRosterBuilders.h"
+
+#include "Creature.h"
+#include "Player.h"
+#include "Playerbots.h"
 
 // --- ZulFarrak (map 209) — the TEMPLE (pyramid) event --------------------
 // The scripted set-piece between Witch Doctor Zum'rah and the final boss Chief
@@ -113,6 +118,43 @@ namespace
     // Gahz'rilla's emerge-from-pool walk takes a few seconds; a generous wait
     // bridges the summon delay without escalating to a stall.
     constexpr uint32 ZF_GAHZRILLA_SPAWN_TIMEOUT = 60000;  // 1 min
+
+    // --- Witch Doctor Zum'rah — the area-trigger wake-up ------------------
+    // Zum'rah (7271) is a normal roster boss (order key 3), but he spawns FRIENDLY:
+    // creature_template faction 35, no NOT_SELECTABLE / IMMUNE_TO_PC flag. He turns
+    // hostile only when a party member crosses area trigger 962 (3yd off his spawn),
+    // whose SmartAI row sets his faction to 37. That row runs off CMSG_AREATRIGGER,
+    // which bots never send for a non-teleport trigger — so with a human in the party
+    // he flips as a side effect of the human walking in, and in an all-bot party
+    // (every `dc test` run) he never does. The engage gate is attackability-blind
+    // (GetLiveBoss only asks IsAlive), so the tank walks up to a friendly Zum'rah and
+    // the run deadlocks on him forever with no stall message.
+    //
+    // A conditional event fixes it entirely module-side: hook 5 (WakeZumrah) sets the
+    // faction the trigger's SmartAI row would have set. An earlier attempt forged the
+    // CMSG_AREATRIGGER packet instead, to run the genuine script — it did not work in
+    // a live all-bot run, so the packet path (and the MoveTo onto the trigger centre
+    // that existed only to satisfy the core's range check) is gone. See
+    // ObjectiveHookRegistry for the full reasoning.
+    //
+    // Travel to him is NOT this event's job — he is a roster boss, so boss-nav
+    // delivers the tank; the scan range below both gates the event on the party
+    // having arrived and doubles as this conditional's proximity check (it has no
+    // arrival step, so it is listed in the integrity test's near-gated whitelist).
+    //
+    // REPEATABLE, like the Razorfen Downs gong: a wipe runs his "On Reset - Restore
+    // faction" row, putting him back to 35, and a one-shot latch would leave the
+    // second attempt deadlocked exactly as before. The condition ends the loop by
+    // itself the moment he is hostile (or dead), so the repeat is self-limiting.
+    constexpr uint32 ZF_ZUMRAH = 7271;
+    // Comfortably beyond boss engage range so the event fires as soon as boss-nav
+    // parks the tank at him, before the engage loop settles into its deadlock —
+    // but near enough that it can never fire from across the dungeon.
+    constexpr float ZF_ZUMRAH_SCAN = 60.0f;
+    constexpr uint32 ZF_ZUMRAH_FACTION_FRIENDLY = 35;  // creature_template default
+    constexpr uint32 ZF_HOOK_WAKE_ZUMRAH = 5;  // ObjectiveHookRegistry id
+
+    bool ZfZumrahAsleep(Player* bot, AiObjectContext* context);
 }
 
 void RegisterZulFarrakEvents(std::vector<DungeonEvent>& out)
@@ -174,4 +216,104 @@ void RegisterZulFarrakEvents(std::vector<DungeonEvent>& out)
                           .Timeout(ZF_GAHZRILLA_SPAWN_TIMEOUT)
                       .KillCreatureEngage(ZF_GAHZRILLA, /*count*/ 1, /*searchRadius*/ 100.0f)
                       .Build());
+
+    // Wake Zum'rah: flip him hostile once the party reaches him, so he fights an
+    // all-bot party the same way he fights a human who walked in. Folded under
+    // Zum'rah in the panel — it is his pull, not a step of its own.
+    out.push_back(EventBuilder(209, 3, "Wake Witch Doctor Zum'rah")
+                      .Conditional(&ZfZumrahAsleep)
+                      .Repeatable()
+                      .PanelBeforeBoss(ZF_ZUMRAH)
+                      .Custom(ZF_HOOK_WAKE_ZUMRAH)
+                      .Build());
+}
+
+// --- the wake-up gate (event 3, repeatable) ------------------------------
+// DUE while Zum'rah is alive, within scan range, and still carrying his spawn
+// faction. Reads false the instant the flip lands (the boss flow takes him from
+// there) and once he is dead or out of range, so the repeat can never spin: the
+// only state that keeps it true is the exact deadlock it fixes.
+//
+// Tests faction 35 DIRECTLY rather than asking IsValidAttackTarget. The first
+// version used the latter and the live run never woke him — with no log we could
+// not tell whether the predicate or the packet was at fault, so this reads the
+// one value the whole bug is about, which is also the value the hook writes.
+namespace
+{
+    bool ZfZumrahAsleep(Player* bot, AiObjectContext* /*context*/)
+    {
+        Creature* zumrah = bot->FindNearestCreature(ZF_ZUMRAH, ZF_ZUMRAH_SCAN);
+        if (!zumrah || !zumrah->IsAlive())
+            return false;
+
+        // Still on his spawn faction => nobody has tripped area trigger 962.
+        return zumrah->GetFaction() == ZF_ZUMRAH_FACTION_FRIENDLY;
+    }
+}
+
+// --- roster patch (relocated from BossRosterRegistry) --------------------
+void RegisterZulFarrakRoster(std::vector<BossRosterPatch>& t)
+{
+    using namespace DcRoster;
+
+    // --- ZulFarrak (map 209) -------------------------------------
+    // ORDER FIX. The DBC encounter order does NOT match the travel path:
+    // Hydromancer Velratha carries bit 0, so the auto path sent the tank
+    // straight to the far sacred pool FIRST, before anything else. The
+    // sensible (and Blizzard-intended) clear sweeps the dungeon front to
+    // back and saves the pool for last:
+    //   1. Theka the Martyr      (DBC bit 3)
+    //   2. Antu'sul              (DBC bit 2)
+    //   3. Witch Doctor Zum'rah  (DBC bit 4)
+    //   4. Temple Summit         (objective — the Executioner event)
+    //   5. Chief Ukorz Sandscalp (DBC bit 7 — opens after the event)
+    //   6. Hydromancer Velratha  (DBC bit 0 — at the sacred pool)
+    //   7. Sacred Pool           (objective — the Gahz'rilla gong)
+    // Reorder the five auto-derived bosses in place (orderOverride keys
+    // 1..6 on a contiguous scale shared with the two objectives) so each
+    // sorts into its path slot while its real DBC kill-bit is untouched.
+    //
+    // The temple event (Executioner / Bly's Band) at the top of the great
+    // staircase opens the door to Chief Ukorz; the tank must trigger it
+    // before heading to Ukorz or it bee-lines into his closed door and
+    // stalls. The Temple Summit objective (key 4) sits just before Ukorz
+    // (key 5). eventId 1 is the full PERSISTENT temple step list (see
+    // ZulFarrakEvents.cpp): kill the executioner, crack a cage, survive
+    // the waves, descend to help kill the temple bosses, gossip Weegli
+    // (door) and Bly (final fight). Only when Bly dies does the event
+    // complete and latch this objective, after which the clear proceeds
+    // to Ukorz with the door open.
+    {
+        BossRosterPatch p;
+        p.mapId = 209;
+        p.reorder = {
+            { 7272, 1 },  // Theka the Martyr      (DBC bit 3)
+            { 8127, 2 },  // Antu'sul              (DBC bit 2)
+            { 7271, 3 },  // Witch Doctor Zum'rah  (DBC bit 4)
+            { 7267, 5 },  // Chief Ukorz Sandscalp (DBC bit 7)
+            { 7795, 6 },  // Hydromancer Velratha  (DBC bit 0)
+        };
+        p.add = {
+            MakeObjective(OBJ(1), /*encounterIndex*/ 7, 209,
+                          "Temple Summit (Executioner event)",
+                          1886.8f, 1289.9f, 46.0f,
+                          /*arriveRadius*/ 12.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 1, /*orderOverride*/ 4),
+            // The optional Gahz'rilla gong, ordered LAST (key 7): the
+            // strictly-ordinal picker only routes the tank to the sacred
+            // pool once every real boss is dead. Anchor sits ON the gong
+            // (GO 141832 spawn coords) so boss-nav delivers the tank right
+            // to it; eventId 2 (see ZulFarrakEvents.cpp) rings it and kills
+            // the summoned boss. gateEntry 0: the event owns completion
+            // (Gahz'rilla dead), not "boss alive". The objective carries no
+            // real kill-bit, so its key can't collide with a set encounter
+            // bit.
+            MakeObjective(OBJ(2), /*encounterIndex*/ 8, 209,
+                          "Sacred Pool (Gahz'rilla gong)",
+                          1650.91f, 1171.88f, 10.901f,
+                          /*arriveRadius*/ 12.0f, /*gateEntry*/ 0,
+                          /*hook*/ 0, /*eventId*/ 2, /*orderOverride*/ 7),
+        };
+        t.push_back(std::move(p));
+    }
 }

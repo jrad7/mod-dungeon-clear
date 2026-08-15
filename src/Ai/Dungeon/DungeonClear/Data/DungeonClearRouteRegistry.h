@@ -16,7 +16,9 @@
 // Per-dungeon, per-boss list of waypoint anchors. The chunked pathfinder uses
 // these as trusted intermediate hops between the bot's current position and
 // the boss creature's spawn point. Lookup is keyed by (mapId, difficulty,
-// bossEntry); a miss simply means anchor-free chunking is used for that boss.
+// bossEntry); a non-normal miss falls back to the map's NORMAL row (heroic
+// shares the geometry, and routes are authored under normal); a full miss
+// simply means anchor-free chunking is used for that boss.
 //
 // Registration mirrors the other DungeonClear data registries: each dungeon
 // drops a self-contained `Overrides/Routes/<DungeonName>Route.cpp` file that

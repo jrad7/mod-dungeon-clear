@@ -1,0 +1,33 @@
+# Test Deck sudoers rules — ONLY needed when [bridge] use_sudo is on, i.e.
+# the worldserver's screen/tmux session belongs to another user (root).
+# A SOAP bridge, or a same-user session, needs NO sudo: skip this file.
+#
+# Generate the filled-in version for your config with:
+#     python3 -m testdeck sudoers > /tmp/ac-testdeck
+#     visudo -c -f /tmp/ac-testdeck && sudo install -m 440 /tmp/ac-testdeck /etc/sudoers.d/ac-testdeck
+#
+# The hardcopy path is inside [paths] data_dir (a 0700 directory owned by the
+# Test Deck user), NOT in /tmp: root writes that file and we read it back, so
+# a world-writable location would let any local user plant a symlink there and
+# aim root's write — or our privileged read — at a file of their choosing.
+# It is also distinct from ac-dashboard's, so both tools can drive one screen
+# session without racing.
+#
+# If you installed these rules before the path moved out of /tmp, regenerate
+# them: the old @HARDCOPY@ line no longer matches what Test Deck runs.
+
+# screen bridge
+@USER@ ALL=(root) NOPASSWD: /usr/bin/screen -ls
+@USER@ ALL=(root) NOPASSWD: /usr/bin/screen -S @SCREEN@ -p 0 -X stuff *
+@USER@ ALL=(root) NOPASSWD: /usr/bin/screen -S @SCREEN@ -p 0 -X hardcopy @HARDCOPY@
+@USER@ ALL=(root) NOPASSWD: /usr/bin/cat @HARDCOPY@
+@USER@ ALL=(root) NOPASSWD: /usr/bin/rm -f @HARDCOPY@
+
+# tmux bridge
+@USER@ ALL=(root) NOPASSWD: /usr/bin/tmux has-session -t @TMUX@
+@USER@ ALL=(root) NOPASSWD: /usr/bin/tmux send-keys -t @TMUX@ *
+@USER@ ALL=(root) NOPASSWD: /usr/bin/tmux capture-pane -p -t @TMUX@
+
+# history clearing (only reached when a direct truncate fails)
+@USER@ ALL=(root) NOPASSWD: /usr/bin/truncate -s 0 @TESTRUNS@
+@USER@ ALL=(root) NOPASSWD: /usr/bin/truncate -s 0 @TESTPLANS@

@@ -10,6 +10,7 @@
 
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Value.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
 
@@ -17,7 +18,7 @@ class DungeonBossesValue : public CalculatedValue<std::vector<DungeonBossInfo>>
 {
 public:
     DungeonBossesValue(PlayerbotAI* botAI)
-        : CalculatedValue<std::vector<DungeonBossInfo>>(botAI, "dungeon bosses", 5)
+        : CalculatedValue<std::vector<DungeonBossInfo>>(botAI, DcKey::DungeonBosses, 5)
     {
     }
 

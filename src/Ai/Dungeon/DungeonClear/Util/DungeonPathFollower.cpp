@@ -187,6 +187,55 @@ float DungeonPathFollower::RouteDeviation(Player* bot, ChunkedPathfinder::Result
     return std::sqrt(dist2);
 }
 
+std::optional<G3D::Vector3> DungeonPathFollower::CurrentPoint(ChunkedPathfinder::Result const& path,
+                                                              DungeonFollowerState const& state)
+{
+    if (path.segments.empty() || state.segmentIdx >= path.segments.size())
+        return std::nullopt;
+    return PointAt(path, state.segmentIdx, state.pointIdx);
+}
+
+bool DungeonPathFollower::PointIsBehind(float botX, float botY, float pX, float pY,
+                                        float dirX, float dirY)
+{
+    // Degenerate heading: no opinion. Callers keep their existing behaviour.
+    if (dirX * dirX + dirY * dirY <= 0.0001f)
+        return false;
+    // Negative projection onto the route heading = reaching it means travelling
+    // against the route.
+    return (pX - botX) * dirX + (pY - botY) * dirY < 0.0f;
+}
+
+bool DungeonPathFollower::HopIsBehind(Player* bot, ChunkedPathfinder::Result const& path,
+                                      DungeonFollowerState const& state, Hop const& hop)
+{
+    if (!bot || hop.isDone)
+        return false;
+
+    std::optional<G3D::Vector3> const cur =
+        PointAt(path, state.segmentIdx, state.pointIdx);
+    if (!cur.has_value())
+        return false;
+
+    // Route tangent at the cursor: forward to the next point when there is one,
+    // else the incoming leg at a path tail.
+    std::optional<G3D::Vector3> ref = NextPoint(path, state.segmentIdx, state.pointIdx);
+    G3D::Vector3 from = *cur;
+    if (!ref.has_value())
+    {
+        ref = cur;
+        std::optional<G3D::Vector3> const prev =
+            PrevPoint(path, state.segmentIdx, state.pointIdx);
+        if (!prev.has_value())
+            return false;
+        from = *prev;
+    }
+
+    return PointIsBehind(bot->GetPositionX(), bot->GetPositionY(),
+                         hop.point.x, hop.point.y,
+                         ref->x - from.x, ref->y - from.y);
+}
+
 bool DungeonPathFollower::IsOffPath(Player* bot, ChunkedPathfinder::Result const& path, DungeonFollowerState& state)
 {
     if (!bot || path.segments.empty() || state.segmentIdx >= path.segments.size() ||
@@ -354,7 +403,8 @@ bool DungeonPathFollower::Resnap(Player* bot, ChunkedPathfinder::Result const& p
 }
 
 std::vector<G3D::Vector3> DungeonPathFollower::BuildSplineWindow(Player* bot,
-    ChunkedPathfinder::Result const& path, DungeonFollowerState const& state)
+    ChunkedPathfinder::Result const& path, DungeonFollowerState const& state,
+    float maxYards)
 {
     std::vector<G3D::Vector3> window;
     if (!bot || path.segments.empty() || state.segmentIdx >= path.segments.size())
@@ -366,8 +416,19 @@ std::vector<G3D::Vector3> DungeonPathFollower::BuildSplineWindow(Player* bot,
     // convention.
     window.push_back(G3D::Vector3(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()));
 
-    uint32 seg = state.segmentIdx;
-    uint32 pt = state.pointIdx;
+    AppendWindowPoints(path, state.segmentIdx, state.pointIdx, maxYards, window);
+    return window;
+}
+
+void DungeonPathFollower::AppendWindowPoints(ChunkedPathfinder::Result const& path,
+                                             uint32 seg, uint32 pt, float maxYards,
+                                             std::vector<G3D::Vector3>& window)
+{
+    if (window.empty())
+        return;  // needs the live-position seed to accumulate length from
+
+    float accumulated = 0.0f;
+    G3D::Vector3 prev = window.back();
     while (seg < path.segments.size() && window.size() < MAX_SPLINE_WINDOW_POINTS)
     {
         PathSegment const& s = path.segments[seg];
@@ -378,8 +439,15 @@ std::vector<G3D::Vector3> DungeonPathFollower::BuildSplineWindow(Player* bot,
 
         if (pt < s.polyline.size())
         {
-            window.push_back(s.polyline[pt]);
+            G3D::Vector3 const& next = s.polyline[pt];
+            window.push_back(next);
             ++pt;
+            // Cap AFTER pushing: the point that crosses the cap is included, and
+            // a cap smaller than the first leg still yields one forward point.
+            accumulated += (next - prev).length();
+            prev = next;
+            if (maxYards > 0.0f && accumulated >= maxYards)
+                break;
         }
         else
         {
@@ -387,8 +455,6 @@ std::vector<G3D::Vector3> DungeonPathFollower::BuildSplineWindow(Player* bot,
             pt = 0;
         }
     }
-
-    return window;
 }
 
 std::optional<G3D::Vector3> DungeonPathFollower::PointBehind(Player* bot,

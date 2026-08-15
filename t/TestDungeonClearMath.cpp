@@ -5,6 +5,7 @@
 
 #include "gtest/gtest.h"
 #include "DungeonClearMath.h"
+#include "DcProgressWatchdog.h"
 
 // Test point directly on the segment (midpoint)
 TEST(DungeonClearMathTest, PointOnSegmentMidpoint)
@@ -351,6 +352,180 @@ TEST(DungeonClearCcAssistTest, ZeroNowLatchesToOne)
 }
 
 // ---------------------------------------------------------------------------
+// ShouldTripCampSafety — the camp-safety valve gate (attribution + grace).
+// Mirrors the ShouldAbortPullForCc fixture: same latch/clear contract.
+// ---------------------------------------------------------------------------
+using DungeonClearMath::ShouldTripCampSafety;
+
+// Splash from the pack being dragged is an ordinary drag, never a valve trip —
+// and it must not so much as arm the latch.
+TEST(DungeonClearCampSafetyTest, CampSafetyDoesNotTripWhenOnlyThePulledPackIsHitting)
+{
+    std::uint32_t out = 12345u;
+    EXPECT_FALSE(ShouldTripCampSafety(true, 26.0f, 65.0f,
+                                      /*attackerIsPullTarget*/ true,
+                                      10000u, 20000u, 0u, out));
+    EXPECT_EQ(out, 0u);
+}
+
+// A third-party attacker below the floor qualifies (zero grace trips at once).
+TEST(DungeonClearCampSafetyTest, CampSafetyTripsForAThirdPartyAttacker)
+{
+    std::uint32_t out = 0u;
+    EXPECT_TRUE(ShouldTripCampSafety(true, 26.0f, 65.0f,
+                                     /*attackerIsPullTarget*/ false,
+                                     0u, 5000u, 0u, out));
+}
+
+// A qualifying flicker that clears inside the grace re-arms fresh next time.
+TEST(DungeonClearCampSafetyTest, CampSafetyGraceSwallowsAFlicker)
+{
+    std::uint32_t out = 0u;
+    EXPECT_FALSE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, 0u, 5000u, 1500u, out));
+    EXPECT_EQ(out, 5000u);
+    // Health recovers above the floor -> latch cleared.
+    EXPECT_FALSE(ShouldTripCampSafety(true, 80.0f, 65.0f, false, out, 5600u, 1500u, out));
+    EXPECT_EQ(out, 0u);
+    // Qualifies again at 5800 — the grace restarts from there, not from 5000.
+    EXPECT_FALSE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, out, 5800u, 1500u, out));
+    EXPECT_EQ(out, 5800u);
+    EXPECT_FALSE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, out, 7200u, 1500u, out));
+}
+
+// Sustained qualifying state fires once the grace has elapsed.
+TEST(DungeonClearCampSafetyTest, CampSafetyFiresAfterSustained)
+{
+    std::uint32_t out = 0u;
+    EXPECT_FALSE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, 0u, 5000u, 1500u, out));
+    EXPECT_EQ(out, 5000u);
+    EXPECT_FALSE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, out, 6499u, 1500u, out));
+    EXPECT_TRUE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, out, 6500u, 1500u, out));
+    EXPECT_EQ(out, 5000u);
+}
+
+// graceMs == 0 preserves today's behaviour exactly: first qualifying tick fires.
+TEST(DungeonClearCampSafetyTest, CampSafetyGraceZeroFiresImmediately)
+{
+    std::uint32_t out = 0u;
+    EXPECT_TRUE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, 0u, 5000u, 0u, out));
+}
+
+// Health back above the floor clears the latch (even from a stale value).
+TEST(DungeonClearCampSafetyTest, CampSafetyLatchClearsWhenHealthRecovers)
+{
+    std::uint32_t out = 9999u;
+    EXPECT_FALSE(ShouldTripCampSafety(true, 90.0f, 65.0f, false, 9999u, 20000u, 0u, out));
+    EXPECT_EQ(out, 0u);
+}
+
+// Out of combat, or a disabled valve (floor <= 0), never qualifies.
+TEST(DungeonClearCampSafetyTest, CampSafetyRespectsCombatAndDisable)
+{
+    std::uint32_t out = 7u;
+    EXPECT_FALSE(ShouldTripCampSafety(false, 10.0f, 65.0f, false, 7u, 20000u, 0u, out));
+    EXPECT_EQ(out, 0u);
+    out = 7u;
+    EXPECT_FALSE(ShouldTripCampSafety(true, 10.0f, 0.0f, false, 7u, 20000u, 0u, out));
+    EXPECT_EQ(out, 0u);
+}
+
+// ---------------------------------------------------------------------------
+// ShouldStandDownForPull — the pull-mode blocking-trash stand-down gate.
+// ---------------------------------------------------------------------------
+using DungeonClearMath::ShouldStandDownForPull;
+
+// The pack the pull pipeline is (or is about to be) working is always its own,
+// whatever the phase — the trigger must never preempt the pull for it.
+TEST(DungeonClearPullStandDownTest, PullModeStandDownHoldsForThePullsOwnTarget)
+{
+    EXPECT_TRUE(ShouldStandDownForPull(/*packIsPullsOwn*/ true, /*idle*/ true));
+    EXPECT_TRUE(ShouldStandDownForPull(/*packIsPullsOwn*/ true, /*idle*/ false));
+}
+
+// A bystander — a pack the pull never selected — with nothing in flight is
+// exactly what the aggro-shaped scan exists for: the walk-in owns the tick.
+TEST(DungeonClearPullStandDownTest, PullModeStandDownReleasesForABystanderWhenPullIsIdle)
+{
+    EXPECT_FALSE(ShouldStandDownForPull(/*packIsPullsOwn*/ false, /*idle*/ true));
+}
+
+// Once a maneuver is in flight the trigger keeps standing down even for a
+// bystander — the maneuver must not be thrashed.
+TEST(DungeonClearPullStandDownTest, PullModeStandDownHoldsForABystanderMidManeuver)
+{
+    EXPECT_TRUE(ShouldStandDownForPull(/*packIsPullsOwn*/ false, /*idle*/ false));
+}
+
+// ---------------------------------------------------------------------------
+// ShouldReleaseStandingPull — the orphaned-pull release gate.
+// ---------------------------------------------------------------------------
+using DungeonClearMath::ShouldReleaseStandingPull;
+
+// The live freeze: the effective mode is off (a persistent anchored event drives
+// the tank), the tank is out of combat, and a pull is still standing at Engage
+// with a marked camp. Nothing else can clean that up — release it.
+TEST(DungeonClearPullReleaseTest, ReleasesAPullLeftStandingWhenTheModeIsForcedOff)
+{
+    EXPECT_TRUE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
+                                          /*partyInCombat*/ false, /*holdingPhase*/ false,
+                                          /*bossPullback*/ false));
+}
+
+// Pull mode on: the pull's own FSM owns its lifecycle, and a camp mid-run is
+// exactly what the party is meant to be holding at.
+TEST(DungeonClearPullReleaseTest, NeverReleasesWhileThePullModeIsOn)
+{
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ true, /*standing*/ true,
+                                           /*partyInCombat*/ false, /*holdingPhase*/ false,
+                                           /*bossPullback*/ false));
+}
+
+// Nothing standing (phase Idle, no camp) — the common case every tick with pull
+// mode off. Must not churn.
+TEST(DungeonClearPullReleaseTest, NoOpWhenNothingIsStanding)
+{
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ false,
+                                           /*partyInCombat*/ false, /*holdingPhase*/ false,
+                                           /*bossPullback*/ false));
+}
+
+// A maneuver in flight — anyone in the party fighting, or a holding phase
+// (Forming/Advancing/Returning) — must finish: clearing its camp mid-drag would
+// dump the party out of the hold and into the inbound pack.
+TEST(DungeonClearPullReleaseTest, NeverReleasesAManeuverInFlight)
+{
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
+                                           /*partyInCombat*/ true, /*holdingPhase*/ false,
+                                           /*bossPullback*/ false));
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
+                                           /*partyInCombat*/ false, /*holdingPhase*/ true,
+                                           /*bossPullback*/ false));
+}
+
+// THE CAMP-FIGHT CASE, and the reason the combat input is party-wide rather than
+// the leader's own flag. Phase Engage with a camp marked: the pack has been
+// dragged home and handed to the followers, and the TANK is flag-clear for a
+// stretch of that fight (a scripted stage tags at range, so the pack arrives
+// strung out and threat lands on whoever it reaches first). Releasing there
+// dismantles the camp underneath a live fight and frees the tank to go form the
+// next pull with the last pack still up — the rotunda's pack-stacking collapse.
+TEST(DungeonClearPullReleaseTest, NeverReleasesACampTheFollowersAreStillFightingAt)
+{
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
+                                           /*partyInCombat*/ true, /*holdingPhase*/ false,
+                                           /*bossPullback*/ false));
+}
+
+// A pull-back drag (Ghaz'an out of the Underbog lake) runs with pull mode off BY
+// DESIGN — its camp is the hand-authored anchor and must survive.
+TEST(DungeonClearPullReleaseTest, NeverReleasesABossPullback)
+{
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
+                                           /*partyInCombat*/ false, /*holdingPhase*/ false,
+                                           /*bossPullback*/ true));
+}
+
+// ---------------------------------------------------------------------------
 // ShouldDropPullVerdict — the no-target verdict-drop grace gate.
 // ---------------------------------------------------------------------------
 using DungeonClearMath::ShouldDropPullVerdict;
@@ -639,44 +814,62 @@ TEST(DungeonClearPlantTest, FlickerDoesNotAccumulate)
 
 using DungeonClearMath::ShouldReleaseFollower;
 
+// Signature: ShouldReleaseFollower(isHealer, alreadyInCombat, combatSinceMs, now,
+// leadMs, tankHp, panicHp). The existing lead-window cases all model a FRESH,
+// out-of-combat DPS/healer (alreadyInCombat == false).
+
 // Healers release immediately, regardless of an unexpired lead.
 TEST(DungeonClearReleaseTest, HealerReleasesImmediately)
 {
-    EXPECT_TRUE(ShouldReleaseFollower(true, 5000u, 5100u, 1500u, 100.0f, 60.0f));
+    EXPECT_TRUE(ShouldReleaseFollower(true, false, 5000u, 5100u, 1500u, 100.0f, 60.0f));
 }
 
 // DPS held inside the lead window, released once it elapses.
 TEST(DungeonClearReleaseTest, DpsHeldThenReleased)
 {
     // 100ms into a 1500ms lead -> held.
-    EXPECT_FALSE(ShouldReleaseFollower(false, 5000u, 5100u, 1500u, 100.0f, 60.0f));
+    EXPECT_FALSE(ShouldReleaseFollower(false, false, 5000u, 5100u, 1500u, 100.0f, 60.0f));
     // Exactly at the lead boundary -> released (inclusive).
-    EXPECT_TRUE(ShouldReleaseFollower(false, 5000u, 6500u, 1500u, 100.0f, 60.0f));
+    EXPECT_TRUE(ShouldReleaseFollower(false, false, 5000u, 6500u, 1500u, 100.0f, 60.0f));
     // Well past -> released.
-    EXPECT_TRUE(ShouldReleaseFollower(false, 5000u, 9000u, 1500u, 100.0f, 60.0f));
+    EXPECT_TRUE(ShouldReleaseFollower(false, false, 5000u, 9000u, 1500u, 100.0f, 60.0f));
 }
 
 // A tank below the panic HP releases the party early despite the lead.
 TEST(DungeonClearReleaseTest, PanicHpBypassesLead)
 {
     // 100ms in, but tank at 55% < 60% panic -> release now.
-    EXPECT_TRUE(ShouldReleaseFollower(false, 5000u, 5100u, 1500u, 55.0f, 60.0f));
+    EXPECT_TRUE(ShouldReleaseFollower(false, false, 5000u, 5100u, 1500u, 55.0f, 60.0f));
     // Tank healthy -> still held.
-    EXPECT_FALSE(ShouldReleaseFollower(false, 5000u, 5100u, 1500u, 80.0f, 60.0f));
+    EXPECT_FALSE(ShouldReleaseFollower(false, false, 5000u, 5100u, 1500u, 80.0f, 60.0f));
     // panicHp 0 disables the bypass: a near-dead tank stays held inside the lead.
-    EXPECT_FALSE(ShouldReleaseFollower(false, 5000u, 5100u, 1500u, 1.0f, 0.0f));
+    EXPECT_FALSE(ShouldReleaseFollower(false, false, 5000u, 5100u, 1500u, 1.0f, 0.0f));
 }
 
 // leadMs == 0 turns the feature off: DPS release at once.
 TEST(DungeonClearReleaseTest, ZeroLeadOff)
 {
-    EXPECT_TRUE(ShouldReleaseFollower(false, 5000u, 5000u, 0u, 100.0f, 60.0f));
+    EXPECT_TRUE(ShouldReleaseFollower(false, false, 5000u, 5000u, 0u, 100.0f, 60.0f));
 }
 
 // combatSince == 0 (leader not observed in combat): gate is moot, release.
 TEST(DungeonClearReleaseTest, NoCombatStampReleases)
 {
-    EXPECT_TRUE(ShouldReleaseFollower(false, 0u, 5100u, 1500u, 100.0f, 60.0f));
+    EXPECT_TRUE(ShouldReleaseFollower(false, false, 0u, 5100u, 1500u, 100.0f, 60.0f));
+}
+
+// alreadyInCombat bypass: a follower ALREADY flagged in combat is released ONTO the
+// tank's fight regardless of an unexpired lead — the "dps run to me, not the tank"
+// fix. It must not be stranded through the lead where stock follow-master (-> the
+// human) would win the tick. Bypasses even a healthy tank deep inside the lead.
+TEST(DungeonClearReleaseTest, AlreadyInCombatBypassesLead)
+{
+    // 100ms into a 1500ms lead, tank at full HP -> a FRESH DPS is held...
+    EXPECT_FALSE(ShouldReleaseFollower(false, false, 5000u, 5100u, 1500u, 100.0f, 60.0f));
+    // ...but the SAME instant, an already-in-combat DPS is released.
+    EXPECT_TRUE(ShouldReleaseFollower(false, true, 5000u, 5100u, 1500u, 100.0f, 60.0f));
+    // Still released even at t == combatSince (0ms elapsed).
+    EXPECT_TRUE(ShouldReleaseFollower(false, true, 5000u, 5000u, 1500u, 100.0f, 60.0f));
 }
 
 // --- Elite weighting: pull weight in thirds of an elite -------------------
@@ -823,6 +1016,95 @@ TEST(DungeonClearPatrolWaitTest, FormationPatrollerStaysInReducedPass)
     EXPECT_EQ(CountReduced(mobs, 0), 6u);  // linked patroller survives
 }
 
+// --- ShouldMusterForScriptedStage (the scripted-stage muster latch) -------
+
+using DungeonClearMath::ShouldMusterForScriptedStage;
+
+// No stage due: never hold, latch cleared. This is every tick of every dungeon
+// without a plan, so it must be the cheap, quiet answer.
+TEST(DungeonClearMusterGateTest, NoStagePendingProceeds)
+{
+    uint32 since = 12345;  // stale latch from a previous stage
+    EXPECT_FALSE(ShouldMusterForScriptedStage(/*stagePending*/ false, /*toppedUp*/ false,
+                                              since, /*now*/ 20000, /*waitMs*/ 40000,
+                                              /*minMs*/ 8000, since));
+    EXPECT_EQ(since, 0u);
+}
+
+// Stage due and the party is already topped up: arm nothing, pull now. The
+// substance floor binds only once ARMED — a party that never fell below the
+// floors pays nothing.
+TEST(DungeonClearMusterGateTest, AToppedUpPartyProceedsImmediately)
+{
+    uint32 since = 0;
+    EXPECT_FALSE(ShouldMusterForScriptedStage(true, /*toppedUp*/ true, since, 20000, 40000,
+                                              8000, since));
+    EXPECT_EQ(since, 0u);
+}
+
+// Stage due, party short: hold, and latch the moment the muster began.
+TEST(DungeonClearMusterGateTest, AShortPartyHoldsAndLatches)
+{
+    uint32 since = 0;
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, /*toppedUp*/ false, since, 20000, 40000,
+                                             8000, since));
+    EXPECT_EQ(since, 20000u);
+    // Still short 10s later, still inside the budget: keep holding on the ORIGINAL
+    // stamp (a re-arm every tick would make the wait unbounded).
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, false, since, 30000, 40000, 8000, since));
+    EXPECT_EQ(since, 20000u);
+}
+
+// THE BOUND, and the reason it exists: the muster floors sit above what stock bots
+// eat and drink back up to, so a party that can never reach them must not be able to
+// stall the run forever. Once the budget is spent the stage arms on the ordinary
+// floors — a pull at 70% mana beats a run that never continues.
+TEST(DungeonClearMusterGateTest, TheWaitIsBounded)
+{
+    uint32 since = 0;
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, false, since, 1000, 40000, 8000, since));
+    EXPECT_FALSE(ShouldMusterForScriptedStage(true, false, since, 41000, 40000, 8000, since));
+    // ...and the latch STAYS armed past the timeout, so the same stage cannot
+    // muster a second time the next tick.
+    EXPECT_EQ(since, 1000u);
+    EXPECT_FALSE(ShouldMusterForScriptedStage(true, false, since, 41100, 40000, 8000, since));
+    EXPECT_EQ(since, 1000u);
+}
+
+// THE SUBSTANCE FLOOR. The release test is an instantaneous percentage over a
+// 5-point band: one AoE heal closed it in 1-5s and stages armed against parties
+// that never sat down (tp-20260806-212646-1, 115/184 musters <=5s the plan
+// before). An ARMED muster therefore holds through minMs even if the floors go
+// green first; only past the floor does topping up release and disarm — so the
+// NEXT stage still gets its own full budget rather than inheriting a spent one.
+TEST(DungeonClearMusterGateTest, AnArmedMusterHoldsTheSubstanceFloor)
+{
+    uint32 since = 0;
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, false, since, 5000, 40000, 8000, since));
+    EXPECT_EQ(since, 5000u);
+    // Percentages closed 4s in (an AoE heal): still inside the floor — hold.
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, /*toppedUp*/ true, since, 9000, 40000,
+                                             8000, since));
+    EXPECT_EQ(since, 5000u);
+    // Past the floor and topped up: release and disarm.
+    EXPECT_FALSE(ShouldMusterForScriptedStage(true, /*toppedUp*/ true, since, 14000, 40000,
+                                              8000, since));
+    EXPECT_EQ(since, 0u);
+}
+
+// waitMs == 0 disables the muster outright (proceed on the first tick, whatever
+// minMs says), and the now == 0 corner must not underflow into a colossal elapsed.
+TEST(DungeonClearMusterGateTest, DegenerateInputs)
+{
+    uint32 since = 0;
+    EXPECT_FALSE(ShouldMusterForScriptedStage(true, false, since, 20000, /*waitMs*/ 0,
+                                              /*minMs*/ 8000, since));
+
+    since = 0;
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, false, since, /*now*/ 0, 40000, 8000, since));
+    EXPECT_EQ(since, 1u);  // never stores 0 — that means "clear"
+}
+
 // --- ShouldWaitForPatrol (the patrol-wait latch gate) ---------------------
 
 using DungeonClearMath::ShouldWaitForPatrol;
@@ -884,4 +1166,1010 @@ TEST(DungeonClearPatrolGateTest, ZeroBudgetProceeds)
 {
     std::uint32_t since = 0u;
     EXPECT_FALSE(ShouldWaitForPatrol(6u, 5u, 5u, since, 100u, 0u, since));
+}
+
+// --- ShouldHandoffFizzledPull (advanced-pull engage-fizzle latch) ----------
+using DungeonClearMath::ShouldHandoffFizzledPull;
+
+TEST(DungeonClearFizzleTest, NonFizzleClearsCount)
+{
+    // Pack died or is still being fought (pulledAliveIdle == false): clear latch.
+    std::uint32_t count = 5u;
+    EXPECT_FALSE(ShouldHandoffFizzledPull(/*aliveIdle*/ false, /*same*/ false, 2u, count));
+    EXPECT_EQ(count, 0u);
+}
+
+TEST(DungeonClearFizzleTest, NewTargetRestartsAtOne)
+{
+    // A fizzle of a different pack than the latch holds restarts the run at 1.
+    std::uint32_t count = 4u;
+    EXPECT_FALSE(ShouldHandoffFizzledPull(/*aliveIdle*/ true, /*same*/ false, 2u, count));
+    EXPECT_EQ(count, 1u);
+}
+
+TEST(DungeonClearFizzleTest, SameTargetRunReachesHandoff)
+{
+    // Two consecutive same-pack fizzles reach DC_PULL_FIZZLE_MAX (2) -> handoff.
+    std::uint32_t count = 0u;
+    EXPECT_FALSE(ShouldHandoffFizzledPull(true, false, 2u, count));  // fizzle #1 (new)
+    EXPECT_EQ(count, 1u);
+    EXPECT_TRUE(ShouldHandoffFizzledPull(true, true, 2u, count));    // fizzle #2 (same)
+    EXPECT_EQ(count, 2u);
+}
+
+TEST(DungeonClearFizzleTest, InterruptingKillResetsRun)
+{
+    // A same-pack fizzle, then the pack dies/gets fought (reset), then it fizzles
+    // again as a "new" run — must NOT hand off on the single post-reset fizzle.
+    std::uint32_t count = 1u;                                        // one prior fizzle
+    EXPECT_FALSE(ShouldHandoffFizzledPull(false, false, 2u, count)); // fought -> reset
+    EXPECT_EQ(count, 0u);
+    EXPECT_FALSE(ShouldHandoffFizzledPull(true, false, 2u, count));  // fresh fizzle
+    EXPECT_EQ(count, 1u);
+}
+
+TEST(DungeonClearFizzleTest, ZeroMaxHandsOffOnFirstFizzle)
+{
+    std::uint32_t count = 0u;
+    EXPECT_TRUE(ShouldHandoffFizzledPull(true, false, 0u, count));
+}
+
+// --- WalkTrailBack (Kernel A: the one shared breadcrumb walk-back primitive) --
+
+using DungeonClearMath::TrailStep;
+using DungeonClearMath::TrailJumpGuard;
+using DungeonClearMath::WalkTrailBack;
+
+TEST(DungeonClearWalkTrailBackTest, AccumulatesAlongNewestToOldest)
+{
+    // 4 crumbs at x = 0,4,8,12. Anchor sits on the newest (x=12). The walk must
+    // visit them oldest-index-descending (12 -> 8 -> 4 -> 0) with `along` growing
+    // 0,4,8,12 and `index` counting down 3,2,1,0.
+    std::vector<Position> trail = MakeLine(4);
+    Position const anchor(12.0f, 0.0f, 0.0f, 0.0f);
+    std::vector<std::size_t> indices;
+    std::vector<float> alongs;
+    float const total = WalkTrailBack(trail, anchor, TrailJumpGuard,
+        [&](TrailStep const& s) -> bool
+        {
+            indices.push_back(s.index);
+            alongs.push_back(s.along);
+            return true;
+        });
+    ASSERT_EQ(indices.size(), 4u);
+    EXPECT_EQ(indices[0], 3u);
+    EXPECT_EQ(indices[3], 0u);
+    EXPECT_FLOAT_EQ(alongs[0], 0.0f);   // anchor sits on crumb 3
+    EXPECT_FLOAT_EQ(alongs[1], 4.0f);
+    EXPECT_FLOAT_EQ(alongs[3], 12.0f);
+    EXPECT_FLOAT_EQ(total, 12.0f);
+}
+
+TEST(DungeonClearWalkTrailBackTest, VisitReturningFalseStopsEarly)
+{
+    // The accept predicate accepts the first crumb at least 6yd back and stops
+    // (the camp/scout "first reachable past the setback" shape).
+    std::vector<Position> trail = MakeLine(6);   // x = 0..20
+    Position const anchor(20.0f, 0.0f, 0.0f, 0.0f);
+    std::size_t accepted = DungeonClearMath::TrailRejoinNone;
+    WalkTrailBack(trail, anchor, TrailJumpGuard,
+        [&](TrailStep const& s) -> bool
+        {
+            if (s.along < 6.0f)
+                return true;
+            accepted = s.index;
+            return false;
+        });
+    // Anchor at crumb 5 (x=20); crumb 3 (x=12) is the first at along >= 6 (=8yd).
+    EXPECT_EQ(accepted, 3u);
+}
+
+// Named regression: dc-scout-lag-trail-dance / dc-multihop — INTERPOLATE the
+// exact-lag point instead of snapping to the next crumb. Snapping to the first
+// crumb past lag overshoots by up to one crumb spacing (~4yd), which parked
+// followers outside PartyMaxSpread and deadlocked the between-pulls gate.
+TEST(DungeonClearWalkTrailBackTest, InterpolatesExactLagPointOnCrossingSegment)
+{
+    std::vector<Position> trail = MakeLine(11);          // x = 0..40, spacing 4
+    Position const tank(40.0f, 0.0f, 0.0f, 0.0f);        // anchor on newest crumb
+    float const lag = 9.0f;
+    Position interp;
+    bool crossed = false;
+    WalkTrailBack(trail, tank, TrailJumpGuard,
+        [&](TrailStep const& s) -> bool
+        {
+            if (s.along < lag)
+                return true;
+            // Only the CROSSING segment interpolates; past it PointAt yields the crumb.
+            interp = (s.alongPrev < lag) ? s.PointAt(lag) : s.crumb;
+            crossed = true;
+            return false;
+        });
+    ASSERT_TRUE(crossed);
+    // Exactly 9yd behind the tank at x=40 => x=31 (crumb-snap would give x=28,
+    // 12yd back — the 3yd overshoot the interpolation fix removes).
+    EXPECT_FLOAT_EQ(interp.GetPositionX(), 31.0f);
+    EXPECT_FLOAT_EQ(interp.GetPositionY(), 0.0f);
+    EXPECT_FLOAT_EQ(tank.GetExactDist(&interp), 9.0f);
+}
+
+// Named regression: dc-pull-breadcrumb-seam-undermap — a 2D jump > guard stops
+// the walk so no camp/trail point is chosen across a drag/teleport seam.
+TEST(DungeonClearWalkTrailBackTest, HorizontalSeamStopsWalk)
+{
+    std::vector<Position> trail;
+    trail.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);    // 0
+    trail.emplace_back(4.0f, 0.0f, 0.0f, 0.0f);    // 1
+    trail.emplace_back(8.0f, 0.0f, 0.0f, 0.0f);    // 2
+    trail.emplace_back(25.0f, 0.0f, 0.0f, 0.0f);   // 3 (17yd gap from crumb 2)
+    Position const anchor(25.0f, 0.0f, 0.0f, 0.0f);
+    std::vector<std::size_t> visited;
+    WalkTrailBack(trail, anchor, TrailJumpGuard,
+        [&](TrailStep const& s) -> bool { visited.push_back(s.index); return true; });
+    // Only the newest crumb is contiguous with the anchor; the 17yd gap is a seam.
+    ASSERT_EQ(visited.size(), 1u);
+    EXPECT_EQ(visited[0], 3u);
+}
+
+// Named regression: dc-pull-breadcrumb-seam-undermap (vertical form) — a drop
+// that is short in plan view but > guard in 3D must read as a seam, so a camp
+// pick never lands on the wrong floor ("tank runs under the map").
+TEST(DungeonClearWalkTrailBackTest, VerticalSeamStopsWalkEvenWhen2DContiguous)
+{
+    std::vector<Position> trail;
+    trail.emplace_back(0.0f, 0.0f, 0.0f, 0.0f);    // 0
+    trail.emplace_back(4.0f, 0.0f, 0.0f, 0.0f);    // 1  (lower floor)
+    trail.emplace_back(6.0f, 0.0f, 20.0f, 0.0f);   // 2  (2yd in 2D, +20yd Z: upper floor)
+    Position const anchor(6.0f, 0.0f, 20.0f, 0.0f);
+    std::vector<std::size_t> visited;
+    WalkTrailBack(trail, anchor, TrailJumpGuard,
+        [&](TrailStep const& s) -> bool { visited.push_back(s.index); return true; });
+    // crumb 2 -> crumb 1 is ~20yd in 3D (> guard) though only 2yd in 2D: the walk
+    // stops, so nothing on the lower floor is treated as "behind" the upper camp.
+    ASSERT_EQ(visited.size(), 1u);
+    EXPECT_EQ(visited[0], 2u);
+}
+
+TEST(DungeonClearWalkTrailBackTest, EmptyTrailWalksNothing)
+{
+    std::vector<Position> empty;
+    Position const anchor(0.0f, 0.0f, 0.0f, 0.0f);
+    int count = 0;
+    float const total = WalkTrailBack(empty, anchor, TrailJumpGuard,
+        [&](TrailStep const&) -> bool { ++count; return true; });
+    EXPECT_EQ(count, 0);
+    EXPECT_FLOAT_EQ(total, 0.0f);
+}
+
+TEST(DungeonClearWalkTrailBackTest, PointAtClampsOutsideSegment)
+{
+    // A single crumb 4yd back: PointAt below the segment returns the near end,
+    // above returns the far end (crumb); the exact midpoint interpolates.
+    std::vector<Position> trail = MakeLine(2);        // crumbs at x=0, x=4
+    Position const anchor(4.0f, 0.0f, 0.0f, 0.0f);
+    Position lo, mid, hi;
+    WalkTrailBack(trail, anchor, TrailJumpGuard,
+        [&](TrailStep const& s) -> bool
+        {
+            if (s.index != 0u)
+                return true;                          // segment (x=4)->(x=0), along 0..4
+            lo = s.PointAt(-1.0f);
+            mid = s.PointAt(2.0f);
+            hi = s.PointAt(99.0f);
+            return false;
+        });
+    EXPECT_FLOAT_EQ(lo.GetPositionX(), 4.0f);         // clamped to segStart (near end)
+    EXPECT_FLOAT_EQ(mid.GetPositionX(), 2.0f);        // midpoint
+    EXPECT_FLOAT_EQ(hi.GetPositionX(), 0.0f);         // clamped to crumb (far end)
+}
+
+// ===== Phantom-combat escape hatch (IsPhantomCombat / ShouldBreakStuckCombat) =====
+
+// The classifier is phantom ONLY when in combat with none of the three "real fight"
+// signals. Each signal independently rules phantom out.
+TEST(DungeonClearStuckCombatTest, PhantomOnlyWhenNothingFightable)
+{
+    // In combat, nothing meleeing, no victim, no legitimate (reachable) holder.
+    EXPECT_TRUE(DungeonClearMath::IsPhantomCombat(true, false, false, false));
+
+    // Not in combat -> never phantom, whatever else holds.
+    EXPECT_FALSE(DungeonClearMath::IsPhantomCombat(false, false, false, false));
+}
+
+TEST(DungeonClearStuckCombatTest, AnyRealFightSignalIsNotPhantom)
+{
+    // Something is meleeing us (getAttackers non-empty).
+    EXPECT_FALSE(DungeonClearMath::IsPhantomCombat(true, true,  false, false));
+    // We have a victim of our own.
+    EXPECT_FALSE(DungeonClearMath::IsPhantomCombat(true, false, true,  false));
+    // A legitimate (alive, non-evading, path-REACHABLE) holder — this is the flee/
+    // kite case: the pursuer is reachable, so combat is never treated as phantom.
+    EXPECT_FALSE(DungeonClearMath::IsPhantomCombat(true, false, false, true));
+}
+
+// Reachability says a holder COULD come; IsHolderProsecutingFight says whether it IS.
+TEST(DungeonClearStuckCombatTest, HolderInEngageRangeAlwaysProsecutes)
+{
+    constexpr float engageRange = 22.0f;
+
+    // Inside engage range is a fight whatever the closing tracker says — a mob toe to
+    // toe with us that simply cannot get closer must never read as stale.
+    EXPECT_TRUE(DungeonClearMath::IsHolderProsecutingFight(true, 5.0f, engageRange, false));
+    EXPECT_TRUE(DungeonClearMath::IsHolderProsecutingFight(true, engageRange, engageRange, false));
+
+    // The opaque script-forced case reports distance 0 with a legitimate verdict, so it
+    // lands here too and is never cleared.
+    EXPECT_TRUE(DungeonClearMath::IsHolderProsecutingFight(true, 0.0f, engageRange, false));
+}
+
+TEST(DungeonClearStuckCombatTest, FarHolderProsecutesOnlyWhileClosing)
+{
+    constexpr float engageRange = 22.0f;
+
+    // A chaser / a mob we are kiting keeps improving its closest-ever distance.
+    EXPECT_TRUE(DungeonClearMath::IsHolderProsecutingFight(true, 70.0f, engageRange, true));
+
+    // Far and no longer closing: the instanced no-leash straggler that tagged us and
+    // stopped. This is the arm that lets the hatch fire (tr-20260804-153254-2).
+    EXPECT_FALSE(DungeonClearMath::IsHolderProsecutingFight(true, 70.0f, engageRange, false));
+
+    // No legitimate holder at all -> nothing prosecuting, whatever the other inputs.
+    EXPECT_FALSE(DungeonClearMath::IsHolderProsecutingFight(false, 1.0f, engageRange, true));
+}
+
+// The closing signal is produced by DcProgressWatchdog::TickClosing, so wire the two
+// together the way the trigger does and prove the stale-holder shape converges: a
+// holder that stops reads as prosecuting exactly once (the arming sample) and never
+// again, while a party that walks AWAY from it cannot re-arm it.
+TEST(DungeonClearStuckCombatTest, StoppedHolderStopsProsecutingAndStaysStopped)
+{
+    constexpr float engageRange = 22.0f;
+    DcProgressWatchdog watch;
+    std::uint32_t now = 1000;
+
+    auto prosecuting = [&](float dist)
+    {
+        now += 200;
+        bool const closing = watch.TickClosing(dist, 0.5f, now);
+        return DungeonClearMath::IsHolderProsecutingFight(true, dist, engageRange, closing);
+    };
+
+    // First sample arms the tracker and counts as progress.
+    EXPECT_TRUE(prosecuting(70.0f));
+    // Holder is stationary: no improvement, so it stops counting as a fight.
+    EXPECT_FALSE(prosecuting(70.0f));
+    EXPECT_FALSE(prosecuting(70.0f));
+    // The party shuttles away and back — distance gets WORSE then returns to the same
+    // value, which is not an improvement on the closest-ever. Still stale.
+    EXPECT_FALSE(prosecuting(99.0f));
+    EXPECT_FALSE(prosecuting(70.0f));
+    // It finally starts chasing -> prosecuting again, and the hatch goes back to sleep.
+    EXPECT_TRUE(prosecuting(60.0f));
+    EXPECT_TRUE(prosecuting(40.0f));
+}
+
+// The streak gate: a transient phantom tick must not fire; only a phantom state held
+// continuously for the timeout does, and any break resets the clock.
+TEST(DungeonClearStuckCombatTest, StreakGateArmsHoldsAndFires)
+{
+    std::uint32_t since = 0;
+    constexpr std::uint32_t timeout = 15000;
+
+    // Not phantom -> stays disarmed.
+    EXPECT_FALSE(DungeonClearMath::ShouldBreakStuckCombat(false, 1000, timeout, since));
+    EXPECT_EQ(since, 0u);
+
+    // First phantom tick arms the clock to `now` but does not fire.
+    EXPECT_FALSE(DungeonClearMath::ShouldBreakStuckCombat(true, 1000, timeout, since));
+    EXPECT_EQ(since, 1000u);
+
+    // Still phantom, just short of the timeout -> hold, clock unchanged.
+    EXPECT_FALSE(DungeonClearMath::ShouldBreakStuckCombat(true, 1000 + timeout - 1, timeout, since));
+    EXPECT_EQ(since, 1000u);
+
+    // Phantom held for the full timeout -> fire.
+    EXPECT_TRUE(DungeonClearMath::ShouldBreakStuckCombat(true, 1000 + timeout, timeout, since));
+}
+
+TEST(DungeonClearStuckCombatTest, AnyBreakResetsTheStreak)
+{
+    std::uint32_t since = 0;
+    constexpr std::uint32_t timeout = 15000;
+
+    // Arm, then run most of the way toward firing.
+    DungeonClearMath::ShouldBreakStuckCombat(true, 1000, timeout, since);
+    EXPECT_FALSE(DungeonClearMath::ShouldBreakStuckCombat(true, 1000 + timeout - 100, timeout, since));
+
+    // A single non-phantom tick (a reachable target reappeared) resets the clock...
+    EXPECT_FALSE(DungeonClearMath::ShouldBreakStuckCombat(false, 1000 + timeout - 50, timeout, since));
+    EXPECT_EQ(since, 0u);
+
+    // ...so the next phantom streak must run the FULL timeout again from scratch.
+    EXPECT_FALSE(DungeonClearMath::ShouldBreakStuckCombat(true, 2000 + timeout, timeout, since));
+    EXPECT_EQ(since, 2000u + timeout);
+    EXPECT_TRUE(DungeonClearMath::ShouldBreakStuckCombat(true, 2000 + 2 * timeout, timeout, since));
+}
+
+TEST(DungeonClearStuckCombatTest, ZeroTimeoutDisablesTheRecovery)
+{
+    std::uint32_t since = 0;
+    // timeout 0 = feature off: never fires, and keeps the clock disarmed even while
+    // the phantom state holds.
+    EXPECT_FALSE(DungeonClearMath::ShouldBreakStuckCombat(true, 5000, 0, since));
+    EXPECT_EQ(since, 0u);
+    EXPECT_FALSE(DungeonClearMath::ShouldBreakStuckCombat(true, 99999, 0, since));
+    EXPECT_EQ(since, 0u);
+}
+
+TEST(DungeonClearStuckCombatTest, ArmingAtTimeZeroAvoidsTheSentinel)
+{
+    std::uint32_t since = 0;
+    // getMSTime() is ~0 only in the first server ms; arming must not leave `since`
+    // at the 0 "disarmed" sentinel or the clock would re-arm every tick and never
+    // accumulate. It is nudged to 1 instead.
+    EXPECT_FALSE(DungeonClearMath::ShouldBreakStuckCombat(true, 0, 15000, since));
+    EXPECT_EQ(since, 1u);
+}
+
+// ===== Flagged-in-combat driving gate (MayDriveWhileFlagged) =====
+//
+// The DC driving ladder used to stand down on the raw core combat FLAG. A hostile
+// area aura sets that flag with no fight behind it (Arcatraz Entropic Aura, 45yd vs
+// a ~20yd aggro radius), and because playerbots never enters the combat engine on
+// the flag alone, BOTH ladders went inert and the run froze permanently. S1356.
+
+TEST(DcFlaggedCombatGateTest, NotFlaggedAlwaysDrives)
+{
+    std::uint32_t since = 12345;
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(false, false, 1000, 5000, since));
+    EXPECT_EQ(since, 0u);   // streak cleared so a later flag starts clean
+}
+
+TEST(DcFlaggedCombatGateTest, RealFightAlwaysStandsDown)
+{
+    std::uint32_t since = 0;
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, true, 1000, 5000, since));
+    EXPECT_EQ(since, 0u);
+    // ...and no amount of elapsed time changes that while the fight is live.
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, true, 999000, 5000, since));
+}
+
+TEST(DcFlaggedCombatGateTest, FlaggedWithNoFightResumesOnlyAfterTheGrace)
+{
+    std::uint32_t since = 0;
+    constexpr std::uint32_t grace = 5000;
+
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, grace, since));
+    EXPECT_EQ(since, 1000u);
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000 + grace - 1, grace, since));
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000 + grace, grace, since));
+}
+
+TEST(DcFlaggedCombatGateTest, ARetargetHoleInARealFightNeverResumesDriving)
+{
+    // THE REGRESSION THAT MATTERS. A target dies, nothing has re-acquired for a
+    // tick or two, then the fight continues. Without the streak reset those holes
+    // would accumulate and the tank would walk out of a live fight.
+    std::uint32_t since = 0;
+    constexpr std::uint32_t grace = 5000;
+
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, grace, since));
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 3000, grace, since));
+    // something re-acquires -> streak broken
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, true, 3200, grace, since));
+    EXPECT_EQ(since, 0u);
+    // wedged again: the clock restarts, the old 2000ms is NOT credited
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 3400, grace, since));
+    EXPECT_EQ(since, 3400u);
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 3400 + grace - 1, grace, since));
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(true, false, 3400 + grace, grace, since));
+}
+
+TEST(DcFlaggedCombatGateTest, ZeroGraceResumesImmediately)
+{
+    std::uint32_t since = 0;
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, 0, since));
+}
+
+TEST(DcFlaggedCombatGateTest, ArmingAtTimeZeroAvoidsTheSentinel)
+{
+    std::uint32_t since = 0;
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 0, 5000, since));
+    EXPECT_EQ(since, 1u);
+}
+
+// The rest gates ask the same kernel a DIFFERENT question — "is the PARTY
+// flagged with nothing fighting?" (DcCombatFlag::IsPhantomFlag) — so they feed it
+// a different `flagged` input and must therefore keep their own streak. These two
+// pin the reason the latches are separate (DcApproachState::flaggedNoEngageSinceMs
+// vs partyFlaggedNoEngageSinceMs).
+
+TEST(DcFlaggedCombatGateTest, TwoQuestionsKeepTwoStreaks)
+{
+    // The tank drops combat while a follower is still flagged: the driving latch
+    // clears (its input went false) while the party latch keeps streaking.
+    std::uint32_t driving = 0;
+    std::uint32_t party = 0;
+    constexpr std::uint32_t grace = 5000;
+
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, grace, driving));
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, grace, party));
+
+    // Tank unflags at t=2000; the party (a follower still in the aura) does not.
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(false, false, 2000, grace, driving));
+    EXPECT_EQ(driving, 0u);   // driving streak reset...
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 2000, grace, party));
+    EXPECT_EQ(party, 1000u);  // ...party streak untouched, still counting from 1000
+
+    // The party waiver lands on ITS OWN schedule, not the tank's.
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000 + grace, grace, party));
+}
+
+TEST(DcFlaggedCombatGateTest, TheRestWaiverDoesNotFireInThePostFightWindow)
+{
+    // THE REGRESSION THAT MATTERS for the rest gate: every fight ends with a few
+    // seconds of "still flagged, nothing engaged yet". Waiving the HP/mana floors
+    // there would send the tank off to the next pull instead of drinking. The
+    // grace is what makes the waiver mean "this flag is never going to clear".
+    std::uint32_t party = 0;
+    constexpr std::uint32_t grace = 5000;
+
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, grace, party));
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000 + grace - 1, grace, party));
+    // Combat drops for real -> streak cleared, ordinary floors apply again.
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(false, false, 1000 + grace, grace, party));
+    EXPECT_EQ(party, 0u);
+}
+
+// ===== Bystander-detour borrow watchdog (ShouldKeepAvoidDetour) =====
+//
+// The pull borrows the approach tick from Advance to walk around another pack's
+// aggro sphere. Advance's wedge ladder is parked while it holds the tick, so the
+// borrow is bounded by a NO-PROGRESS clock: closing on the pack keeps it alive
+// indefinitely; orbiting without closing hands the walk back.
+
+TEST(DungeonClearAvoidDetourTest, ProgressKeepsTheBorrowAliveIndefinitely)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+    constexpr std::uint32_t timeout = 8000;
+
+    // First tick arms the clock and records the distance.
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000, 60.0f, timeout, 1.0f, since, best));
+    EXPECT_EQ(since, 1000u);
+    EXPECT_FLOAT_EQ(best, 60.0f);
+
+    // A long arc that keeps closing restamps every time, so the budget never runs
+    // out even though far more than `timeout` has elapsed since the detour began.
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(20000, 50.0f, timeout, 1.0f, since, best));
+    EXPECT_EQ(since, 20000u);
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(60000, 40.0f, timeout, 1.0f, since, best));
+    EXPECT_EQ(since, 60000u);
+    EXPECT_FLOAT_EQ(best, 40.0f);
+}
+
+TEST(DungeonClearAvoidDetourTest, SidewaysOrbitBurnsTheBudgetAndGivesUp)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+    constexpr std::uint32_t timeout = 8000;
+
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000, 40.0f, timeout, 1.0f, since, best));
+
+    // Orbiting: the tank is moving, but never getting closer to the pack than the
+    // 40yd it started at (it even drifts out to 42). Hold until the budget expires…
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(4000, 41.0f, timeout, 1.0f, since, best));
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000 + timeout - 1, 42.0f, timeout, 1.0f, since, best));
+    // …then hand the walk back to Advance.
+    EXPECT_FALSE(DungeonClearMath::ShouldKeepAvoidDetour(1000 + timeout, 42.0f, timeout, 1.0f, since, best));
+    // The latch is KEPT after a give-up, so the predicate keeps saying no while
+    // the orbit keeps not closing.
+    EXPECT_FALSE(DungeonClearMath::ShouldKeepAvoidDetour(1000 + timeout + 500, 41.5f, timeout, 1.0f, since, best));
+}
+
+TEST(DungeonClearAvoidDetourTest, ClosingDistanceAloneWouldReArmTheClock)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+    constexpr std::uint32_t timeout = 8000;
+
+    ASSERT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000, 40.0f, timeout, 1.0f, since, best));
+    ASSERT_FALSE(DungeonClearMath::ShouldKeepAvoidDetour(1000 + timeout, 40.0f, timeout, 1.0f, since, best));
+
+    // Distance closed while the borrow was off beats the recorded best, so the
+    // PREDICATE re-arms on a fresh clock. This is exactly why the pull caller does
+    // NOT lean on it after a give-up: one yard of Advance's own walking satisfies
+    // this, and re-borrowing that fast would cancel Advance's spline every few
+    // hundred ms. DcPullContext::avoidGaveUp is the one-shot latch on top.
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(30000, 30.0f, timeout, 1.0f, since, best));
+    EXPECT_EQ(since, 30000u);
+    EXPECT_FLOAT_EQ(best, 30.0f);
+}
+
+TEST(DungeonClearAvoidDetourTest, SubEpsilonJitterIsNotProgress)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+    constexpr std::uint32_t timeout = 8000;
+
+    ASSERT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000, 40.0f, timeout, 1.0f, since, best));
+
+    // A glide's tick-to-tick jitter must not count as closing, or an orbit that
+    // creeps inward by centimetres would hold the borrow open forever.
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(2000, 39.5f, timeout, 1.0f, since, best));
+    EXPECT_EQ(since, 1000u);              // clock NOT restamped
+    EXPECT_FLOAT_EQ(best, 40.0f);         // best NOT lowered
+    EXPECT_FALSE(DungeonClearMath::ShouldKeepAvoidDetour(1000 + timeout, 39.5f, timeout, 1.0f, since, best));
+}
+
+TEST(DungeonClearAvoidDetourTest, ZeroTimeoutNeverGivesUp)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+
+    ASSERT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000, 40.0f, 0, 1.0f, since, best));
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(999000, 40.0f, 0, 1.0f, since, best));
+}
+
+TEST(DungeonClearAvoidDetourTest, ArmingAtTimeZeroAvoidsTheSentinel)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+    // Same sentinel hazard as the stuck-combat clock: `since == 0` means "not
+    // borrowing", so arming on server-ms 0 must nudge to 1 or the clock re-arms
+    // every tick and the budget never accumulates.
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(0, 40.0f, 8000, 1.0f, since, best));
+    EXPECT_EQ(since, 1u);
+}
+
+// --- Camp-assist attack range ------------------------------------------------
+// Regression cover for the DC<->stock handoff dead band: DC's engage test and the
+// stock reach action's keep-closing test must partition the distance line with no
+// gap, or a ranged follower parks between them and never engages.
+
+TEST(DungeonClearAssistRangeTest, RangedEngagesWhereStockReachParksIt)
+{
+    // The live repro (Steamvault, 2026-07-20): SpellDistance 28.5, player+humanoid
+    // combat reach ~3.2. Stock reach spell goes inert at 28.5 + 3.2 = 31.7, so it
+    // parked ranged DPS at 29.4-29.7yd and stopped. The old test here demanded
+    // 28.5 - CONTACT_DISTANCE = 28.0, so every one of those ticks read "out of
+    // range -> yield to stock" and nobody ever acted.
+    float const spell = 28.5f;
+    float const reachSum = 3.2f;
+    for (float dist : {29.4f, 29.5f, 29.6f, 29.7f})
+        EXPECT_TRUE(DungeonClearMath::IsWithinAssistAttackRange(
+            /*isMelee*/ false, dist, /*meleeRange*/ 4.0f, spell, reachSum))
+            << "ranged must engage at " << dist << "yd — stock reach will not close further";
+}
+
+TEST(DungeonClearAssistRangeTest, RangedWindowIsExactComplementOfStockKeepClosing)
+{
+    // The invariant that keeps the dead band closed: stock keeps closing exactly
+    // while dist > spell + reachSum, so DC must engage from exactly dist <= that.
+    // Any daylight between these two bounds is a hang.
+    float const spell = 28.5f;
+    float const reachSum = 3.2f;
+    float const stockStopsAt = spell + reachSum;
+
+    EXPECT_TRUE(DungeonClearMath::IsWithinAssistAttackRange(false, stockStopsAt, 4.0f, spell, reachSum));
+    EXPECT_TRUE(DungeonClearMath::IsWithinAssistAttackRange(false, stockStopsAt - 0.01f, 4.0f, spell, reachSum));
+    // Beyond it stock is still walking the bot in, so yielding is correct.
+    EXPECT_FALSE(DungeonClearMath::IsWithinAssistAttackRange(false, stockStopsAt + 0.01f, 4.0f, spell, reachSum));
+}
+
+TEST(DungeonClearAssistRangeTest, RangedWindowTracksCombatReach)
+{
+    // A big-model target has a larger combat reach, which pushes stock's stop point
+    // further out; the engage window must follow it rather than stay pinned to a
+    // bare spell distance.
+    EXPECT_TRUE(DungeonClearMath::IsWithinAssistAttackRange(false, 34.0f, 4.0f, 28.5f, /*reachSum*/ 6.0f));
+    EXPECT_FALSE(DungeonClearMath::IsWithinAssistAttackRange(false, 34.0f, 4.0f, 28.5f, /*reachSum*/ 3.2f));
+}
+
+TEST(DungeonClearAssistRangeTest, MeleeKeepsItsOwnReachInclusiveThreshold)
+{
+    // Melee already overlaps stock reach-melee (reachSum + 1.0 vs reachSum + 0.75),
+    // so it passes its own precomputed threshold and must ignore the spell terms —
+    // double-counting reach here would let melee "engage" from yards away.
+    EXPECT_TRUE(DungeonClearMath::IsWithinAssistAttackRange(true, 4.0f, /*meleeRange*/ 4.2f, 28.5f, 3.2f));
+    EXPECT_FALSE(DungeonClearMath::IsWithinAssistAttackRange(true, 5.0f, /*meleeRange*/ 4.2f, 28.5f, 3.2f));
+    // Well inside spell range but outside melee reach: still not engageable.
+    EXPECT_FALSE(DungeonClearMath::IsWithinAssistAttackRange(true, 20.0f, /*meleeRange*/ 4.2f, 28.5f, 3.2f));
+}
+
+TEST(DungeonClearAssistRangeTest, TriggerStandDownUsesTheSameWindowAsTheAction)
+{
+    // Issue #18. S1116 fixed the ACTION but left ShouldAssistCampFight (the trigger
+    // that gates it) on a bare `dist <= GetRange("spell")`, so the dead band moved
+    // into the trigger: the action engaged from <= spell + reachSum while the
+    // stand-down needed <= spell. A ranged follower in between made the trigger fire
+    // forever on a mob the action had already decided was in range.
+    //
+    // Live trace: SpellDistance 28.5, casters pinned at 29.0-31.0yd with the two
+    // biggest clusters at 30.6 and 30.8. reachSum is read off the trace rather than
+    // guessed — the action engaged out to 31.0yd, so spell + reachSum >= 31.0.
+    float const spell = 28.5f;
+    float const reachSum = 2.5f;
+
+    for (float dist : {29.0f, 30.1f, 30.6f, 30.8f})
+    {
+        EXPECT_TRUE(DungeonClearMath::IsWithinAssistAttackRange(
+            /*isMelee*/ false, dist, /*meleeRange*/ 4.0f, spell, reachSum))
+            << "trigger must stand down at " << dist
+            << "yd — the action already engages there and stock will not close";
+        EXPECT_GT(dist, spell) << "the old bare-spell test would have kept firing here";
+    }
+}
+
+TEST(DungeonClearAssistRangeTest, MeleeTriggerArmStaysWiderThanTheActionArm)
+{
+    // The trigger keeps `reach + 5.0` for melee on purpose. It must remain LOOSER
+    // than the action's `reachSum + 1.0` so the two overlap; if this ever inverts,
+    // melee gains the gap that ranged just lost.
+    float const botReach = 1.5f;
+    float const targetReach = 2.1f;
+    float const triggerMeleeRange = botReach + 5.0f;
+    float const actionMeleeRange = botReach + targetReach + 1.0f;
+    EXPECT_GT(triggerMeleeRange, actionMeleeRange);
+
+    // A melee bot between the two thresholds stands down and lets stock reach-melee
+    // (stop point reachSum + 0.75) walk it the rest of the way.
+    float const between = 0.5f * (actionMeleeRange + triggerMeleeRange);
+    EXPECT_TRUE(DungeonClearMath::IsWithinAssistAttackRange(
+        /*isMelee*/ true, between, triggerMeleeRange, 28.5f, botReach + targetReach));
+}
+
+// --- DecideChase (the chase leash) ---------------------------------------
+// A pull/engage target is latched by GUID and re-aimed at its live position every
+// tick, so a mob that WALKS turns the approach into a pursuit across the room —
+// waking every pack the mob's route passes behind. The leash pins the approach to
+// the ground the plan was made against and waits a receding target out instead.
+
+using DungeonClearMath::ChaseVerdict;
+using DungeonClearMath::DecideChase;
+
+namespace
+{
+    // Named wrapper so the call sites below read as the scenario they are.
+    ChaseVerdict Chase(float drift, float gapAtAnchor, float gapNow, bool hot,
+                       float leash, std::uint32_t now, std::uint32_t holdMs,
+                       std::uint32_t& hold)
+    {
+        return DecideChase(drift, gapAtAnchor, gapNow, hot, leash, now, holdMs, hold);
+    }
+}
+
+TEST(DungeonClearChaseLeashTest, AStationaryPackIsAlwaysFollowed)
+{
+    std::uint32_t hold = 0;
+    EXPECT_EQ(Chase(0.0f, 30.0f, 30.0f, false, 15.0f, 1000u, 6000u, hold),
+              ChaseVerdict::Follow);
+    EXPECT_EQ(hold, 0u);
+}
+
+TEST(DungeonClearChaseLeashTest, WobbleInsideTheLeashIsNotAChase)
+{
+    // Ordinary wander/patrol wobble around a spawn must never hold the tank —
+    // a RANDOM_MOTION radius is typically 5-10yd and the leash sits above it.
+    std::uint32_t hold = 0;
+    EXPECT_EQ(Chase(14.9f, 30.0f, 44.0f, false, 15.0f, 1000u, 6000u, hold),
+              ChaseVerdict::Follow);
+    EXPECT_EQ(hold, 0u);
+}
+
+TEST(DungeonClearChaseLeashTest, ARecedingTargetIsHeldThenGivenUpOn)
+{
+    std::uint32_t hold = 0;
+    // Past the leash AND further from our commit spot than when we picked it.
+    EXPECT_EQ(Chase(20.0f, 30.0f, 44.0f, false, 15.0f, 1000u, 6000u, hold),
+              ChaseVerdict::Hold);
+    EXPECT_EQ(hold, 1000u);           // latch armed at first receding tick
+    // Still holding partway through the wait, latch untouched.
+    EXPECT_EQ(Chase(26.0f, 30.0f, 50.0f, false, 15.0f, 5000u, 6000u, hold),
+              ChaseVerdict::Hold);
+    EXPECT_EQ(hold, 1000u);
+    // Wait elapsed: give up rather than stall the run on a patrol that left.
+    EXPECT_EQ(Chase(30.0f, 30.0f, 55.0f, false, 15.0f, 7000u, 6000u, hold),
+              ChaseVerdict::GiveUp);
+}
+
+TEST(DungeonClearChaseLeashTest, AnInboundPatrolIsFollowedDespiteTheDrift)
+{
+    // The whole point of holding is that a patrol loops back. A mob that has come
+    // at least as close to our commit spot as it was when picked is that return
+    // leg — following it is what lets the tank tag it without ever advancing.
+    std::uint32_t hold = 1000u;
+    EXPECT_EQ(Chase(40.0f, 30.0f, 22.0f, false, 15.0f, 3000u, 6000u, hold),
+              ChaseVerdict::Follow);
+    EXPECT_EQ(hold, 0u) << "the hold must disarm the moment it comes back";
+}
+
+TEST(DungeonClearChaseLeashTest, AHotDestinationIsHeldEvenWhenItIsComingToUs)
+{
+    // Standing inside another pack's aggro sphere is not walkable ground however
+    // close it is: reaching it wakes that pack no matter how the route bends. This
+    // is the half en-route avoidance structurally cannot cover — it steers around
+    // spheres IN THE WAY, and a sphere containing the destination has no way past.
+    std::uint32_t hold = 0;
+    EXPECT_EQ(Chase(2.0f, 30.0f, 10.0f, /*hot*/ true, 15.0f, 1000u, 6000u, hold),
+              ChaseVerdict::Hold);
+    EXPECT_EQ(hold, 1000u);
+    // It steps clear of the neighbour: resume at once, latch disarmed.
+    EXPECT_EQ(Chase(2.0f, 30.0f, 10.0f, /*hot*/ false, 15.0f, 1200u, 6000u, hold),
+              ChaseVerdict::Follow);
+    EXPECT_EQ(hold, 0u);
+}
+
+TEST(DungeonClearChaseLeashTest, ZeroLeashIsTheHistoricalAlwaysChase)
+{
+    std::uint32_t hold = 4242u;
+    EXPECT_EQ(Chase(500.0f, 5.0f, 500.0f, true, 0.0f, 1000u, 6000u, hold),
+              ChaseVerdict::Follow);
+    EXPECT_EQ(hold, 0u) << "a disabled gate must not leave a latch behind";
+}
+
+TEST(DungeonClearChaseLeashTest, ZeroHoldGivesUpImmediatelyWithoutArming)
+{
+    std::uint32_t hold = 0;
+    EXPECT_EQ(Chase(20.0f, 30.0f, 44.0f, false, 15.0f, 1000u, 0u, hold),
+              ChaseVerdict::GiveUp);
+    EXPECT_EQ(hold, 0u);
+}
+
+TEST(DungeonClearChaseLeashTest, ArmingOnMillisecondZeroDoesNotReadAsUnarmed)
+{
+    // Same corner every latch in this file guards: 0 is the "unarmed" sentinel, so
+    // arming at getMSTime() == 0 must nudge to 1 or the hold restarts every tick.
+    std::uint32_t hold = 0;
+    EXPECT_EQ(Chase(20.0f, 30.0f, 44.0f, false, 15.0f, 0u, 6000u, hold),
+              ChaseVerdict::Hold);
+    EXPECT_EQ(hold, 1u);
+}
+
+TEST(DungeonClearChaseLeashTest, ABackwardClockStepCannotFakeAnExpiry)
+{
+    // getMSTime() wrap / a backward step must read as "no time has elapsed", not as
+    // a huge unsigned elapsed that gives up on a target we only just started
+    // waiting for.
+    std::uint32_t hold = 5000u;
+    EXPECT_EQ(Chase(20.0f, 30.0f, 44.0f, false, 15.0f, /*now*/ 100u, 6000u, hold),
+              ChaseVerdict::Hold);
+    EXPECT_EQ(hold, 5000u);
+}
+
+// ---------------------------------------------------------------------------
+// PathProgressCursor — where along a route the bot has walked up to.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    // Shadowfang Keep's tower, taken from the navmesh: the staircase from the
+    // Fenrus room (Z 129) up to Wolf Master Nandos (Z 156) climbs almost
+    // directly overhead, so a route vertex on the landing 10yd UP sits CLOSER in
+    // 2D than the vertex on the floor the tank is actually standing on.
+    std::vector<G3D::Vector3> SfkStaircaseRoute()
+    {
+        return {
+            G3D::Vector3(-130.67f, 2169.07f, 129.16f),  // the tank's own floor
+            G3D::Vector3(-129.33f, 2168.00f, 138.76f),  // landing, one storey up
+            G3D::Vector3(-128.00f, 2174.93f, 155.83f),  // top of the stairs
+            G3D::Vector3(-120.70f, 2162.00f, 155.80f),  // Nandos, at the gate
+        };
+    }
+}
+
+TEST(DungeonClearPathCursorTest, PicksTheVertexOnTheBotsOwnFloor)
+{
+    // The tank is at the foot of the stairs. Vertex 1 is 1.81yd away in 2D and
+    // vertex 0 is 1.98yd away, so a 2D pick lands a storey up; in 3D vertex 1 is
+    // 9.9yd away and vertex 0 wins.
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(SfkStaircaseRoute(),
+                                                   -130.9f, 2167.1f, 129.0f),
+              0u);
+}
+
+TEST(DungeonClearPathCursorTest, FollowsTheBotUpTheStairs)
+{
+    // Standing on the landing, the cursor moves with it — the floor vertex below
+    // is now the far one.
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(SfkStaircaseRoute(),
+                                                   -129.5f, 2168.2f, 138.8f),
+              1u);
+    // And at the top, the tank's progress is the last leg, not the stairwell it
+    // is standing directly above.
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(SfkStaircaseRoute(),
+                                                   -121.0f, 2162.5f, 155.8f),
+              3u);
+}
+
+TEST(DungeonClearPathCursorTest, EmptyRouteReturnsZero)
+{
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor({}, 0.0f, 0.0f, 0.0f), 0u);
+}
+
+TEST(DungeonClearPathCursorTest, FlatRouteIsUnaffectedByTheZTerm)
+{
+    // The ordinary single-storey case must behave exactly as the old 2D pick did.
+    std::vector<G3D::Vector3> const flat{
+        G3D::Vector3(0.0f, 0.0f, 100.0f),
+        G3D::Vector3(10.0f, 0.0f, 100.0f),
+        G3D::Vector3(20.0f, 0.0f, 100.0f),
+    };
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(flat, 11.0f, 2.0f, 100.0f), 1u);
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(flat, 19.0f, -3.0f, 100.5f), 2u);
+}
+
+// --- PullTagStopDistance (where the tag walk-in stops) ---------------------
+using DungeonClearMath::PullTagStopDistance;
+
+namespace
+{
+    // The live numbers this was rebuilt against: MgT's Sunblade elites carry
+    // detection_range 20 and are level 70-71 against a level-70 party, so
+    // GetAggroRange is 20-21yd. A bear tank's reach plus a humanoid's plus one is
+    // ~4.3yd, which is the value the rotunda log kept printing as its STOP distance.
+    float constexpr kAggro  = 20.0f;
+    float constexpr kMelee  = 4.3f;
+    // As passed by DcPullActions: 1500ms grace, 3yd/s, and a scripted stage's floor
+    // is the aggro edge less DC_PULL_SCRIPTED_CREEP_LIMIT (4yd).
+    uint32 constexpr kGrace = 1500;
+    float constexpr kRate   = 3.0f;
+    float constexpr kScriptedFloor = kAggro - 2.0f - 4.0f;   // 14.0
+}
+
+TEST(DcPullTagStopTest, StopsTwoYardsInsideTheAggroRadius)
+{
+    // The notice test is centre-to-centre distance vs GetAggroRange, re-run only on
+    // relocation — so the tank has to ARRIVE strictly inside the radius. Two yards.
+    bool force = true;
+    EXPECT_FLOAT_EQ(PullTagStopDistance(kAggro, kMelee, 0, kGrace, kRate, 0.0f, force),
+                    18.0f);
+    EXPECT_FALSE(force);
+    // Still 18 all the way through the grace: the arrival tick almost always trips
+    // the notice on its own, and re-creeping immediately would just add a redundant
+    // micro-move.
+    EXPECT_FLOAT_EQ(PullTagStopDistance(kAggro, kMelee, kGrace, kGrace, kRate, 0.0f,
+                                        force),
+                    18.0f);
+}
+
+TEST(DcPullTagStopTest, AnOrdinaryPullMayCreepAllTheWayToContact)
+{
+    // Unbounded is right for a corridor pull: the pack it eventually touches is the
+    // pack it came for, and a tank parked exactly at the edge is never re-evaluated.
+    bool force = false;
+    EXPECT_NEAR(PullTagStopDistance(kAggro, kMelee, kGrace + 1000, kGrace, kRate, 0.0f,
+                                    force),
+                15.0f, 0.01f);
+    EXPECT_FALSE(force);
+    EXPECT_FLOAT_EQ(PullTagStopDistance(kAggro, kMelee, kGrace + 10000, kGrace, kRate,
+                                        0.0f, force),
+                    kMelee);
+    EXPECT_TRUE(force);
+}
+
+TEST(DcPullTagStopTest, AScriptedStageCreepsFourYardsAndNoFurther)
+{
+    // THE REGRESSION. A scripted stage's clock used to run from the start of
+    // Advancing, which on a rotunda row is the far end of a 60-77yd walk to the stand
+    // spot — so the first walk-in tick already carried 10s+ of creep, the stop point
+    // collapsed onto the melee floor, and the tank body-pulled the formation from the
+    // inside. Live: `closing to aggro edge (27.5yd, stop 4.3)` on every stage of
+    // tp-20260803-232932-1, 10/10 runs stalled or wiped in that room.
+    //
+    // Two things stop it coming back. The caller now measures from stand-spot
+    // arrival, which is this function's `closingMs` argument and is asserted in
+    // DcPullActions rather than here. And the floor below, which bounds what any
+    // amount of clock can spend.
+    bool force = true;
+    for (uint32 ms : {kGrace + 5000, kGrace + 20000, kGrace + 120000})
+    {
+        EXPECT_FLOAT_EQ(PullTagStopDistance(kAggro, kMelee, ms, kGrace, kRate,
+                                            kScriptedFloor, force),
+                        kScriptedFloor)
+            << "closingMs=" << ms;
+        EXPECT_FALSE(force) << "closingMs=" << ms;
+    }
+    // And the four yards it may spend are real — the creep still exists, because a
+    // few more yards of approach is what generates the relocations the notice needs.
+    EXPECT_NEAR(PullTagStopDistance(kAggro, kMelee, kGrace + 1000, kGrace, kRate,
+                                    kScriptedFloor, force),
+                15.0f, 0.01f);
+    // 14.0 is a long way outside the pack. The rotunda's rows are authored with
+    // 12-24yd of margin measured at the aggro edge and none at all at the spawn, so
+    // "how far past the edge may this creep" is the difference between the plan
+    // working and the plan taking a neighbouring formation.
+    EXPECT_GT(kScriptedFloor, kMelee + 8.0f);
+}
+
+TEST(DcPullTagStopTest, ForceTagOnlyWhenClosingCannotCrossTheThreshold)
+{
+    // The core floors aggro at 5yd, so a much-higher-level tank can face a pack whose
+    // radius is inside its own melee reach. Closing can never trip the notice there —
+    // the caller has to swing — and that is the ONLY thing forceTag means.
+    bool force = false;
+    EXPECT_FLOAT_EQ(PullTagStopDistance(5.0f, kMelee, 0, kGrace, kRate, 0.0f, force),
+                    kMelee);
+    EXPECT_TRUE(force);
+
+    // A scripted stage's floor does not rescue a genuinely-too-small radius: body
+    // contact is the last floor either way.
+    EXPECT_FLOAT_EQ(PullTagStopDistance(5.0f, kMelee, 0, kGrace, kRate, 1.0f, force),
+                    kMelee);
+    EXPECT_TRUE(force);
+}
+
+// ===========================================================================
+// NearestPointOnPolyline2D — the point on a walk a mob comes closest to. Backs
+// the en-route sweep's "would it actually see us" veto (DcTargeting::
+// FindEnRouteAggroPack), which shoots one LOS ray from the mob to this point.
+// ===========================================================================
+
+TEST(DungeonClearMathTest, NearestPointOnPolylineNeedsTwoPoints)
+{
+    G3D::Vector3 out(-1.0f, -1.0f, -1.0f);
+    EXPECT_FALSE(DungeonClearMath::NearestPointOnPolyline2D({}, 0.0f, 0.0f, out));
+    EXPECT_FALSE(DungeonClearMath::NearestPointOnPolyline2D(
+        {G3D::Vector3(1.0f, 2.0f, 3.0f)}, 0.0f, 0.0f, out));
+    // Untouched on failure — a caller must never shoot a ray at a stale point.
+    EXPECT_FLOAT_EQ(out.x, -1.0f);
+}
+
+TEST(DungeonClearMathTest, NearestPointOnPolylineProjectsOntoTheNearestLeg)
+{
+    // An L: out along +X, then up along +Y.
+    std::vector<G3D::Vector3> const route{G3D::Vector3(0.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(20.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(20.0f, 20.0f, 0.0f)};
+    G3D::Vector3 out;
+
+    // Beside the first leg.
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, 8.0f, 5.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 8.0f);
+    EXPECT_FLOAT_EQ(out.y, 0.0f);
+
+    // Beside the second.
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, 26.0f, 12.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 20.0f);
+    EXPECT_FLOAT_EQ(out.y, 12.0f);
+}
+
+TEST(DungeonClearMathTest, NearestPointOnPolylineClampsToTheEnds)
+{
+    std::vector<G3D::Vector3> const route{G3D::Vector3(0.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(20.0f, 0.0f, 0.0f)};
+    G3D::Vector3 out;
+
+    // Behind the start and past the end both clamp to a real endpoint rather
+    // than running off the infinite line.
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, -30.0f, 4.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 0.0f);
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, 55.0f, 4.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 20.0f);
+}
+
+TEST(DungeonClearMathTest, NearestPointOnPolylineInterpolatesZ)
+{
+    // A ramp climbing 10yd over 20yd of run. The Z matters: the LOS ray is shot
+    // from this point + eye height, and snapping to a vertex instead would aim
+    // the ray 5yd under (or over) the floor the walker is actually on.
+    std::vector<G3D::Vector3> const route{G3D::Vector3(0.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(20.0f, 0.0f, 10.0f)};
+    G3D::Vector3 out;
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, 10.0f, 3.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 10.0f);
+    EXPECT_FLOAT_EQ(out.z, 5.0f);
+}
+
+TEST(DungeonClearMathTest, NearestPointOnPolylineToleratesDegenerateLegs)
+{
+    // The route smoother emits coincident points at anchor joins; a zero-length
+    // leg must not divide by zero, it collapses to its own start point.
+    std::vector<G3D::Vector3> const route{G3D::Vector3(0.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(0.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(20.0f, 0.0f, 0.0f)};
+    G3D::Vector3 out;
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, 6.0f, 2.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 6.0f);
+    EXPECT_FLOAT_EQ(out.y, 0.0f);
 }

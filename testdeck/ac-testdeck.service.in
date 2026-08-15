@@ -1,0 +1,24 @@
+# Test Deck systemd unit — OPTIONAL. If you don't use systemd, just run
+# `python3 -m testdeck serve` under whatever supervises your worldserver.
+#
+#   sed "s|@USER@|$USER|; s|@DIR@|/path/to/mod-dungeon-clear/testdeck|" \
+#       ac-testdeck.service.in | sudo tee /etc/systemd/system/ac-testdeck.service
+#   sudo systemctl daemon-reload && sudo systemctl enable --now ac-testdeck
+
+[Unit]
+Description=Test Deck (mod-dungeon-clear dungeon testing frontend)
+After=network.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@DIR@
+Environment=TESTDECK_CONFIG=@DIR@/testdeck.toml
+# For a SOAP bridge, keep the password out of the config file:
+#Environment=TESTDECK_SOAP_PASS=change-me
+ExecStart=/usr/bin/python3 -m testdeck serve
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

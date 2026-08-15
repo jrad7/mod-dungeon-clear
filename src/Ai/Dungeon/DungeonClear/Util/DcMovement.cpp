@@ -4,14 +4,17 @@
  */
 
 #include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
 #include <algorithm>
 
 #include "Log.h"
 #include "MotionMaster.h"
+#include "MoveSpline.h"
 #include "Player.h"
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 namespace DcMovement
 {
@@ -25,7 +28,7 @@ namespace DcMovement
     {
         if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
             if (AiObjectContext* ctx = botAI->GetAiObjectContext())
-                ctx->GetValue<LastMovement&>("last movement")->Get().lastdelayTime = 0.0f;
+                ctx->GetValue<LastMovement&>(DcKey::Stock::LastMovement)->Get().lastdelayTime = 0.0f;
     }
 
     // Kill an in-flight ESCORT glide so a forced rebuild/reset starts from a
@@ -39,6 +42,13 @@ namespace DcMovement
         MotionMaster* mm = bot->GetMotionMaster();
         if (mm && mm->GetCurrentMovementGeneratorType() == ESCORT_MOTION_TYPE)
             bot->StopMoving();
+        ZeroLastMovementWait(bot);
+    }
+
+    void ClearMovementWait(Player* bot)
+    {
+        if (!bot)
+            return;
         ZeroLastMovementWait(bot);
     }
 
@@ -105,13 +115,21 @@ namespace DcMovement
         AiObjectContext* ctx = botAI->GetAiObjectContext();
         if (!ctx)
             return false;
-        return !ctx->GetValue<bool>("dungeon clear paused")->Get();
+        return !DcRun::Of(ctx).paused;
     }
 
     bool SplinePath(PlayerbotAI* botAI, Movement::PointsArray& pts,
                     MovementPriority recordPrio)
     {
         if (!botAI)
+            return false;
+        // Re-check the paused flag at the movement-issuance boundary, mirroring
+        // DcMovementAction::DcMoveTo. Every caller today sits behind a top-of-Execute
+        // pause guard, so this is behaviorally inert now — but it closes the
+        // pause-walks-through-door race class at the mechanism (a mid-tick flip of
+        // "dungeon clear paused" can no longer launch a fresh escort glide) for every
+        // future caller, instead of by hand-pasted convention.
+        if (!DcMovementAllowed(botAI))
             return false;
         Player* bot = botAI->GetBot();
         if (!bot || pts.size() < 2)
@@ -128,7 +146,56 @@ namespace DcMovement
             botAI->InterruptSpell();
         }
 
+        float windowLen = 0.0f;
+        for (size_t i = 1; i < pts.size(); ++i)
+            windowLen += (pts[i] - pts[i - 1]).magnitude();
+
         mm->MoveSplinePath(&pts, FORCED_MOVEMENT_NONE);
+
+        // DID IT ACTUALLY LAUNCH? MotionMaster::MoveSplinePath returns void and has
+        // three silent no-ops: it early-returns on UNIT_FLAG_DISABLE_MOVE without
+        // creating a generator at all; Mutate defers Initialize when a
+        // higher-priority slot (CONTROLLED — root, stun, vehicle) is on top, so the
+        // escort never starts; and an escort that does initialize can finalize on
+        // the spot if the movement layer rejects the points. In all three this
+        // function reported success, so Advance recorded "moving", skipped its
+        // MoveTo fallback, and rebuilt the SAME window next tick — a byte-identical
+        // re-issue loop with the bot standing still.
+        //
+        // Live signature (2026-07-26, two tanks independently): "spline issued:
+        // 4 pts, 16.0yd, speed=7.0, delay=2286ms" five to six times in a row, ~3s
+        // apart, with "advance tick: posDelta=0.00yd moving=0 gen=IDLE(0)" between
+        // every pair. Identical window length means an identical seed point, which
+        // means the bot never moved; IDLE means no escort was ever in flight. The
+        // client animates each spline packet it is sent and is then snapped back by
+        // the next position update, which is the short back-and-forth twitch the
+        // tank does on approach.
+        //
+        // Mutate() calls Initialize() synchronously whenever the new slot is the
+        // top one, so the state below is already settled by the time we read it.
+        MovementGeneratorType const gen = mm->GetCurrentMovementGeneratorType();
+        bool const inFlight = gen == ESCORT_MOTION_TYPE &&
+                              bot->movespline && !bot->movespline->Finalized();
+        if (!inFlight)
+        {
+            LOG_DEBUG("playerbots.dungeonclear",
+                      "[DC:{}] spline REFUSED: {} pts, {:.1f}yd -> gen={} finalized={} "
+                      "dur={} disableMove={} root={} stun={} bot=({:.1f},{:.1f},{:.1f}) "
+                      "end=({:.1f},{:.1f},{:.1f})",
+                      bot->GetName(), pts.size(), windowLen, uint32(gen),
+                      bot->movespline ? bot->movespline->Finalized() : true,
+                      bot->movespline ? bot->movespline->Duration() : -1,
+                      bot->HasUnitFlag(UNIT_FLAG_DISABLE_MOVE),
+                      bot->HasUnitState(UNIT_STATE_ROOT),
+                      bot->HasUnitState(UNIT_STATE_STUNNED),
+                      bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(),
+                      pts.back().x, pts.back().y, pts.back().z);
+            // Report the truth. The caller's contract is "did I issue movement",
+            // and a refused spline is not movement — Advance must fall through to
+            // its per-point MoveTo fallback (which walks, slowly) instead of
+            // standing still re-issuing a spline the movement layer keeps dropping.
+            return false;
+        }
 
         // Record movement so AttackAction::Attack still clears the spline when a
         // patrol aggros mid-glide (its interrupt gate is priority <
@@ -136,16 +203,13 @@ namespace DcMovement
         // delay, so its only remaining job is priority arbitration; sizing it to
         // the window travel time keeps it a faithful "this move lasts ~this long"
         // for the framework's other movement consumers without gating our re-issue.
-        float windowLen = 0.0f;
-        for (size_t i = 1; i < pts.size(); ++i)
-            windowLen += (pts[i] - pts[i - 1]).magnitude();
         float const runSpeed = std::max(0.1f, bot->GetSpeed(MOVE_RUN));
         float delay = 1000.0f * (windowLen / runSpeed);
         delay = std::min(delay, static_cast<float>(sPlayerbotAIConfig.maxWaitForMove));
         delay = std::max(delay, static_cast<float>(sPlayerbotAIConfig.reactDelay));
 
         G3D::Vector3 const& dest = pts.back();
-        botAI->GetAiObjectContext()->GetValue<LastMovement&>("last movement")
+        botAI->GetAiObjectContext()->GetValue<LastMovement&>(DcKey::Stock::LastMovement)
             ->Get().Set(bot->GetMapId(), dest.x, dest.y, dest.z, bot->GetOrientation(),
                         delay, recordPrio);
 
@@ -153,9 +217,24 @@ namespace DcMovement
         // issues spaced ~= their own `delay` mean seamless chaining; a gap much
         // larger than `delay` between a short window's issue and the next is the
         // dead-pause to investigate.
+        //
+        // `net` is the straight-line displacement the window actually buys —
+        // |last - first| — against `windowLen`, the distance walked to get it. A
+        // window whose net is far below its length DOUBLES BACK, and one whose
+        // net is ~0 is a closed loop: the bot runs out and returns to where it
+        // started. That is the open question behind the live "spline issued: 4
+        // pts, 15.9yd" repeated five times with posDelta=0.00yd between each —
+        // whether the bot never moved, or moved out and back over the same
+        // ground. The two look identical from posDelta alone and need opposite
+        // fixes, and the refusal check above has already ruled out the third
+        // possibility (a spline that never launched).
+        float const net = (pts.back() - pts.front()).magnitude();
         LOG_DEBUG("playerbots.dungeonclear",
-                  "[DC:{}] spline issued: {} pts, {:.1f}yd, speed={:.1f}, delay={:.0f}ms",
-                  bot->GetName(), pts.size(), windowLen, runSpeed, delay);
+                  "[DC:{}] spline issued: {} pts, {:.1f}yd, net={:.1f}yd, speed={:.1f}, "
+                  "delay={:.0f}ms, from=({:.1f},{:.1f},{:.1f}) to=({:.1f},{:.1f},{:.1f})",
+                  bot->GetName(), pts.size(), windowLen, net, runSpeed, delay,
+                  pts.front().x, pts.front().y, pts.front().z,
+                  pts.back().x, pts.back().y, pts.back().z);
         return true;
     }
 }

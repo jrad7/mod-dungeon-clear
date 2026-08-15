@@ -7,10 +7,12 @@
 #define _DC_LEADER_SIGNAL_H
 
 #include "Define.h"
+#include "ObjectGuid.h"
 #include "Position.h"
 
 #include <vector>
 
+class Creature;
 class Player;
 
 class DcLeaderSignal
@@ -42,6 +44,41 @@ public:
     // AND non-leader (off-)tanks alike — follows it via the follow-tank trigger.
     static bool IsDungeonClearLeader(Player* bot);
 
+    // The member whose DcRunState OWNS this run — DEAD OR ALIVE. FindLeaderTank
+    // elects only among ALIVE tank bots, so in a 5-man with one tank it returns
+    // nullptr the moment that tank dies, and every gate built on it goes inert
+    // precisely when the run most needs deciding. This one falls back to scanning
+    // the same-map group for the bot whose own run state is `enabled` — which is
+    // only ever the tank that started the run, alive or a corpse.
+    //
+    // Use this (not FindLeaderTank) wherever the question is "what is this RUN's
+    // state", and FindLeaderTank wherever it is "who is DRIVING right now".
+    static Player* FindRunOwner(Player* bot);
+
+    // Elects the single member that runs the TERMINAL rungs — the party-died
+    // bailout and the all-cleared completion. These two are not driving decisions;
+    // they are the run's own verdict on itself, and a run whose tank is a corpse
+    // still has to reach one.
+    //
+    // The driving ladder is leader-gated (see IsDungeonClearLeader), which is right
+    // for everything that moves the tank and fatal for these two: with the leader
+    // dead there is no leader, so `DungeonClearPartyDiedTrigger` never consumes the
+    // Disable verdict and `DungeonClearAllClearedTrigger` never fires. The run then
+    // idles until the 600s no-progress watchdog kills it — 17 of 17 no_progress runs
+    // in the MgT heroic 100-run audit (tp-20260805-005412-1) were exactly this, one
+    // of which (run -76) had already killed all four bosses.
+    //
+    // Election, in order: the living elected leader (so nothing changes in the
+    // healthy case), else the lowest-GUID living bot on the owner's map, else — a
+    // full wipe, where nobody is alive to elect — the lowest-GUID bot on it. Every
+    // member computes the same answer, so exactly one drives. Returns nullptr when
+    // the run is off, paused, or has no owner.
+    static Player* FindTerminalDriver(Player* bot);
+
+    // True when `bot` is that member. The terminal triggers' replacement for the
+    // driving ladder's IsEnabled gate.
+    static bool IsTerminalDriver(Player* bot);
+
     // True when `bot` belongs to a dungeon-clear run that is currently PAUSED —
     // either it is the elected leader and its own run is paused, or it is a
     // follower whose elected leader's run is paused. Reads the leader's
@@ -68,6 +105,19 @@ public:
     // DropInHole and the leader has not yet landed) — no manual flag to go stale.
     // False for the leader itself and off runs. Pass any group member.
     static bool IsLeaderDroppingInHole(Player* bot);
+
+    // The live NPC the group is currently escorting, or nullptr when no escort is
+    // active. Resolves `bot`'s elected leader, confirms its active anchored-event
+    // step is an EscortCreature on an enabled, unpaused run, and returns that
+    // step's escortee creature found near `bot` (alive). This is the "treat the
+    // escortee as a party member" hook: the heal-target machinery folds the result
+    // into its candidate set so a healer heals the escortee (Old Hillsbrad's
+    // Thrall, Wailing Caverns' Disciple, any future escort) exactly as it heals a
+    // teammate — reusing the whole stock heal rotation. Generic (keyed off the
+    // active EscortCreature step, not a hardcoded entry); pass any group member.
+    // Returns nullptr for off/paused runs, no active escort, or the escortee not
+    // being in range of `bot`.
+    static Creature* GetLeaderEscortee(Player* bot);
 
     // --- Advanced pulls -----------------------------------------------------
     // True for the "holding" pull phases (Forming/Advancing/Returning) during
@@ -105,6 +155,24 @@ public:
     // DungeonClearAssistCamp{,Combat}Trigger. Returns false (the common case) for
     // the leader, outside pull mode, or when the leader isn't mid camp-fight.
     static bool IsLeaderCampFightActive(Player* bot);
+
+    // True while `bot`'s leader is fighting a SCRIPTED PULL's camp fight
+    // (ScriptedPullRegistry stage in flight, phase Engage). The follower half of
+    // the tank's camp leash: an ordinary camp fight releases the party to stock
+    // combat, which is right when the pack is already on the tank — and wrong for
+    // a scripted pull, where the tag is taken at range so the pack arrives late
+    // and the rest of it is still standing in a room the party must not enter.
+    // Followers stay ANCHORED (not passive — they fight what comes to them) for
+    // the duration. Drives DungeonClearHoldAtCampCombatTrigger and the camp-hold
+    // action's leash radius / movement priority.
+    static bool IsLeaderScriptedCampFight(Player* bot);
+
+    // True while `bot`'s leader has ANY scripted-pull stage in flight — the tag leg
+    // and the drag as well as the camp fight. Wider than IsLeaderScriptedCampFight
+    // on purpose: the party must be kept out of the room for the WHOLE maneuver,
+    // not only once the fight lands, and the earlier phases are exactly when the
+    // room is still full of the pack that has not been pulled.
+    static bool IsLeaderScriptedPullActive(Player* bot);
 
     // The GENERAL "tank is fighting -> the party assists" gate: true when `bot`'s
     // elected leader tank is in combat on an active (enabled, unpaused) run and
@@ -199,10 +267,35 @@ public:
                                          float& radiusOut);
 
     // Force the leader of `bot`'s group to abandon the current pull and release
-    // the party (sets the leader's pull phase to Engage). Used by the camp-safety
-    // valve when a held, passive follower is taking unexpected damage. No-op if
-    // there is no leader or it isn't mid-pull.
+    // the party (sets the leader's pull phase to Engage). Used by the CC-abort
+    // path when the tank is control-locked mid-drag and the pull is genuinely
+    // failing. No-op if there is no leader or it isn't mid-pull.
     static void AbortLeaderPull(Player* bot);
+
+    // Release the party from their passive camp hold WITHOUT tearing down the
+    // leader's pull. The tank keeps dragging to camp; the followers stop being
+    // punching bags and fight back from the camp the drag is headed to. Used by
+    // the camp-safety valve, which wants "let them fight" and not "abandon the
+    // maneuver" — the abandon variant lands the whole party in the middle of the
+    // room the drag existed to leave. Per leader phase (DcPullContext::
+    // SafetyRelease): Forming/Returning keep the pull and only release the party;
+    // Advancing aborts as AbortLeaderPull did (the tank is still walking TOWARD
+    // the pack — a drag-back from a pull that never tagged is meaningless);
+    // Idle/Engage no-op.
+    static void ReleaseLeaderPullHold(Player* bot);
+
+    // True while the leader's current pull carries a standing camp-safety release
+    // (DcPullContext::partyReleased): the maneuver is still in flight but the
+    // party must NOT be passive, and any DC passive still applied is stripped at
+    // once (no graceful release delay). False when there is no leader / no pull.
+    static bool IsLeaderPullHoldReleased(Player* bot);
+
+    // The pack the leader's current pull tagged (DcPullContext::pullTarget), or
+    // an empty guid when there is no leader / no pull / nothing tagged yet. The
+    // camp-safety valve's attacker attribution reads this to decide whether what
+    // is hitting a held follower is the dragged pack (ordinary splash) or a
+    // second pack (the maneuver is compromised).
+    static ObjectGuid GetLeaderPullTarget(Player* bot);
 
     // Grant (or revoke) the leader tank immunity to the Daze mechanic for the
     // duration of an advanced-pull session. A creature hitting a moving target

@@ -20,6 +20,10 @@ such an encounter surfaces instead of silently going unhandled:
 The spawn-cluster heuristic (room_aggro_scan.py) is the third, weakest signal —
 a geometry cross-check only; this tool supersedes it as the source of truth.
 
+OFFLINE DEV TOOL — not part of the running module: not compiled in, not invoked
+by any hook/tick/command, run by hand. Reads acore_world and src/, writes
+nothing. See tools/README.md.
+
 NOTE on scope: whole-instance pulls (action 38 / CallForHelp with no bounding
 entry list, i.e. SetInCombatWithZone on the boss itself) are OUT of scope — a
 whole zone can't be pre-cleared. They are flagged [zone?] so a reviewer can
@@ -75,8 +79,21 @@ def mysql(args, sql):
          args.db, "-N", "-B", "-e", sql],
         capture_output=True, text=True)
     if out.returncode != 0:
-        sys.exit("mysql failed: " + out.stderr)
+        sys.exit("mysql failed: " + out.stderr.strip())
     return [line.split("\t") for line in out.stdout.splitlines() if line]
+
+
+def spawn_entry_column(args):
+    """`creature.id1` on older schemas, `creature.id` after the upstream rename."""
+    found = {r[0] for r in mysql(args,
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'creature' "
+        "AND COLUMN_NAME IN ('id', 'id1')") if r}
+    for candidate in ("id1", "id"):
+        if candidate in found:
+            return candidate
+    sys.exit("creature table has neither an `id` nor an `id1` column — "
+             "is " + args.db + " really a world DB?")
 
 
 def smartai_scan(args):
@@ -98,9 +115,13 @@ def smartai_scan(args):
     if not by_entry:
         return {}
 
-    # Map each entry to the dungeon map(s) it spawns on.
+    # Map each entry to the dungeon map(s) it spawns on. DISTINCT because a
+    # single entry usually has many spawn rows and only the (entry, map) pair
+    # matters here.
+    entry_col = spawn_entry_column(args)
     entries = ",".join(str(e) for e in by_entry)
-    rows = mysql(args, f"SELECT id1, map FROM creature WHERE id1 IN ({entries})")
+    rows = mysql(args, f"SELECT DISTINCT {entry_col}, map FROM creature "
+                       f"WHERE {entry_col} IN ({entries})")
     result = {}
     for f in rows:
         entry, mapid = int(f[0]), int(f[1])

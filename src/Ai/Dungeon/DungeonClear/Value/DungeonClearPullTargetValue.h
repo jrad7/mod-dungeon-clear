@@ -8,6 +8,7 @@
 
 #include "ObjectGuid.h"
 #include "Value.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
 
@@ -43,7 +44,7 @@ class DungeonClearPullTargetValue : public CalculatedValue<ObjectGuid>
 {
 public:
     DungeonClearPullTargetValue(PlayerbotAI* botAI)
-        : CalculatedValue<ObjectGuid>(botAI, "dungeon clear pull target", 250)
+        : CalculatedValue<ObjectGuid>(botAI, DcKey::PullTarget, 250)
     {
     }
 

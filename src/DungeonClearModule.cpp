@@ -81,7 +81,13 @@
 #include "Ai/Dungeon/DungeonClear/DungeonClearTriggerContext.h"
 #include "Ai/Dungeon/DungeonClear/DungeonClearValueContext.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPathWorker.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcFirstContact.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPullBrake.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
+#include "TestRun/DcTestDriver.h"
+#include "TestRun/DcTestDungeonRegistry.h"
+#include "TestRun/DcTestPlanManager.h"
+#include "TestRun/DcTestRunManager.h"
 
 namespace
 {
@@ -154,6 +160,11 @@ public:
 // Closing half of the mover window — see DungeonClearSpectatorMoverBeginScript
 // for the full story. NOT registered in AddSC_dungeon_clear_module(): it must
 // be instantiated on the first world tick so it sorts after playerbots' hook.
+//
+// This is also where the spectator camera's own slow tick runs (pending-arrival
+// start + follow-target re-resolution). It must sit AFTER the window closes,
+// never between Begin and End: the tick can Stop a live camera, and tearing a
+// possession down inside the bracket would leave the mover swap half-applied.
 class DungeonClearSpectatorMoverEndScript : public PlayerScript
 {
 public:
@@ -162,9 +173,10 @@ public:
             PLAYERHOOK_ON_AFTER_UPDATE
         }) {}
 
-    void OnPlayerAfterUpdate(Player* player, uint32 /*p_time*/) override
+    void OnPlayerAfterUpdate(Player* player, uint32 p_time) override
     {
         DcSpectator::EndBotAiMoverWindow(player);
+        DcSpectator::Tick(player, p_time);
     }
 };
 
@@ -215,6 +227,10 @@ public:
         // map threads only run inside sMapMgr->Update, never concurrently with
         // this world-thread hook.
         new DungeonClearSpectatorMoverEndScript();
+
+        // The dashboard's test-plan start form needs the dungeon catalogue +
+        // caps; publish them once the config is final (first world tick).
+        DcTestDungeonRegistry::WriteSidecar();
 
         LOG_INFO("module", "mod-dungeon-clear: registered DungeonClear contexts "
                            "(strategy/action/trigger/value) into all class "
@@ -279,6 +295,33 @@ public:
     }
 };
 
+// The pull walk-in's brake, wired to the combat flag itself.
+//
+// This is the one thing in the pull FSM that CANNOT be an AI action, because the
+// whole defect is that an AI action arrives too late: the bot is still on the
+// non-combat engine when its pack notices it, so a flip has to happen before the
+// drag-back can run, and the MotionMaster walks the tank further into the formation
+// for the whole of that gap. OnPlayerEnterCombat fires from
+// CombatManager::UpdateOwnerCombatState in the same statement that raises
+// UNIT_FLAG_IN_COMBAT — earlier than any tick, by construction. See DcPullBrake.h.
+class DungeonClearPullBrakeScript : public PlayerScript
+{
+public:
+    DungeonClearPullBrakeScript()
+        : PlayerScript("DungeonClearPullBrakeScript", {
+            PLAYERHOOK_ON_PLAYER_ENTER_COMBAT
+        }) {}
+
+    void OnPlayerEnterCombat(Player* player, Unit* enemy) override
+    {
+        DcPullBrake::OnEnterCombat(player);
+        // Same hook, second reader: `enemy` was discarded here for as long as this
+        // script has existed, and it is the only record anywhere of what STARTED a
+        // fight. See DcFirstContact.h for what that cost.
+        DcFirstContact::OnEnterCombat(player, enemy);
+    }
+};
+
 // Spectator-camera teardown safety net. A leaked possession leaves the human
 // controlling nothing (their mover is a despawning/orphaned dummy), and only we
 // can clean it up — so every exit path below calls DcSpectator::Stop, which is
@@ -317,9 +360,17 @@ public:
 
     // Despawn the dummy before the session goes away; never let the
     // TempSummon outlive its possessor.
+    //
+    // The second call is the crash guard for the OTHER side of a follow
+    // camera: this hook fires for every logging-out player, bots included
+    // (PlayerbotHolder::LogoutPlayerBot -> WorldSession::LogoutPlayer, whose
+    // very first act is this hook), and a watched bot that is deleted without
+    // clearing its viewers leaves their m_seer dangling. See
+    // DcSpectator::NotifyWatchedLoggingOut.
     void OnPlayerBeforeLogout(Player* player) override
     {
         DcSpectator::Stop(player);
+        DcSpectator::NotifyWatchedLoggingOut(player);
     }
 };
 
@@ -400,6 +451,16 @@ public:
         // the global tick (not a per-bot one) so it keeps firing through boss
         // fights, when the bot's non-combat strategy engine is dormant.
         DcStatusPublisher::TickStatusPushes(diff);
+
+        // `.dc test` harness state machine (spawn -> gear -> group -> teleport
+        // -> dc on -> watchdogs -> record). Cheap no-op while no test run is
+        // active; global tick for the same reason as the status pusher.
+        // Headless-driver login poll first (a console start may be waiting on
+        // it), then the plan scheduler (a launch it makes this tick enters the
+        // run manager's tick loop immediately below).
+        DcTestDriver::Tick();
+        DcTestPlanManager::Instance().Tick(diff);
+        DcTestRunManager::Instance().Tick(diff);
 
         // Dungeon-gate correctness net: re-assert "DC strategies installed iff in
         // a dungeon" across all bots on a throttled cadence. The login and
@@ -533,6 +594,7 @@ void AddSC_dungeon_clear_module()
 {
     new DungeonClearRegistrarWorldScript();
     new DungeonClearLoginPlayerScript();
+    new DungeonClearPullBrakeScript();
     // Opening half only — the End script registers on the first world tick so
     // it sorts after playerbots' AI-update hook (see the ordering contract).
     new DungeonClearSpectatorMoverBeginScript();
@@ -541,4 +603,14 @@ void AddSC_dungeon_clear_module()
     new DungeonClearReaperScript();
     new DungeonClearZfStraySummonScript();
     new DungeonClearEranikusCombatReleaseScript();
+
+    // `.dc test` harness: receive each changed STATUS frame for the monitored
+    // tank (addon messages only reach real players in the bot's group, and the
+    // test-run GM deliberately isn't one). Registered here, once, before any
+    // run can exist.
+    DcStatusPublisher::SetStatusObserver(
+        [](ObjectGuid tank, std::string const& payload)
+        {
+            DcTestRunManager::Instance().OnStatusPayload(tank, payload);
+        });
 }

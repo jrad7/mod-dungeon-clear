@@ -35,7 +35,7 @@
 
 namespace dc_access
 {
-#if defined(__GNUC__)
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wnon-template-friend"
 #endif
@@ -73,7 +73,7 @@ namespace dc_access
     template struct Robber<TriggerListTag, &AiObjectContext::sharedTriggerContexts>;
     template struct Robber<ValueListTag, &AiObjectContext::sharedValueContexts>;
 
-#if defined(__GNUC__)
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
 #endif
 

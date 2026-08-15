@@ -4,6 +4,7 @@
  */
 
 #include "DungeonClearBlockingDoorValue.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,12 +18,14 @@
 #include "ModelIgnoreFlags.h"
 #include "Player.h"
 #include "SharedDefines.h"
+#include "Ai/Dungeon/DungeonClear/Data/DcEventDoorRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcDoorIndex.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
 #include "Playerbots.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 namespace
 {
@@ -59,6 +62,26 @@ namespace
         ly = cosA * ddx - sinA * ddy;
     }
 
+    // The door's vertical extent in world Z: its model box scaled onto the GO's
+    // position, padded by DOOR_Z_BAND.
+    void DoorZSpan(GameObject const* go, GameObjectDisplayInfoEntry const* info,
+                   float& loZ, float& hiZ)
+    {
+        float const scale = go->GetObjectScale();
+        float const gz = go->GetPositionZ();
+        loZ = gz + info->minZ * scale - DOOR_Z_BAND;
+        hiZ = gz + info->maxZ * scale + DOOR_Z_BAND;
+    }
+
+    // True when a path leg shares the door's floor. A leg whose height span
+    // misses the door's entirely runs over or under it (a stacked deck, a ramp,
+    // the storey below a tower staircase) and cannot be transiting it, however
+    // close the two look from above.
+    inline bool LegSharesDoorFloor(float loZ, float hiZ, float az, float bz)
+    {
+        return std::max(az, bz) >= loZ && std::min(az, bz) <= hiZ;
+    }
+
     // True when a path leg actually passes THROUGH this door's footprint, rather
     // than merely running near its origin. This is the whole point of the value:
     // doors a route runs PAST (e.g. Shadowfang Keep's first courtyard gate, which
@@ -70,14 +93,11 @@ namespace
                             float bx, float by, float bz)
     {
         float const scale = go->GetObjectScale();
-        float const gz = go->GetPositionZ();
         // Floor / height gate first (cheap): the leg's Z span must overlap the
         // door's vertical extent, padded.
-        float const doorLoZ = gz + info->minZ * scale - DOOR_Z_BAND;
-        float const doorHiZ = gz + info->maxZ * scale + DOOR_Z_BAND;
-        float const legLoZ = std::min(az, bz);
-        float const legHiZ = std::max(az, bz);
-        if (legHiZ < doorLoZ || legLoZ > doorHiZ)
+        float doorLoZ, doorHiZ;
+        DoorZSpan(go, info, doorLoZ, doorHiZ);
+        if (!LegSharesDoorFloor(doorLoZ, doorHiZ, az, bz))
             return false;
 
         float lax, lay, lbx, lby;
@@ -98,7 +118,7 @@ ObjectGuid DungeonClearBlockingDoorValue::Calculate()
 {
     if (!bot || !bot->IsInWorld())
         return ObjectGuid::Empty;
-    if (!AI_VALUE(bool, "dungeon clear enabled") || AI_VALUE(bool, "dungeon clear paused"))
+    if (!DcRun::Of(context).enabled || DcRun::Of(context).paused)
         return ObjectGuid::Empty;
 
     Map* map = bot->GetMap();
@@ -106,7 +126,7 @@ ObjectGuid DungeonClearBlockingDoorValue::Calculate()
         return ObjectGuid::Empty;
 
     ChunkedPathfinder::Result const& path =
-        AI_VALUE(ChunkedPathfinder::Result&, "dungeon clear long path");
+        AI_VALUE(ChunkedPathfinder::Result&, DcKey::LongPath);
     if (!path.reachable || path.segments.empty())
         return ObjectGuid::Empty;
 
@@ -133,6 +153,13 @@ ObjectGuid DungeonClearBlockingDoorValue::Calculate()
     // Baron-run service gate: a closed gate elsewhere got flagged, the panel
     // showed Blocked at an open gate, and the run wandered off after the
     // phantom blocker.
+    //
+    // CRITICAL #3: that cursor is picked in 3D (DungeonClearMath::
+    // PathProgressCursor). A 2D pick snapped a storey UP in Shadowfang Keep's
+    // tower — where the staircase to Nandos climbs directly over the Fenrus
+    // room — and re-created exactly the bee-line-through-walls failure #2
+    // describes, only vertically: the scan began on the landing overhead and
+    // flagged Arugal's Lair 27yd above the tank. See the helper's comment.
     std::vector<G3D::Vector3> pts;
     for (PathSegment const& pathSeg : path.segments)
     {
@@ -146,23 +173,12 @@ ObjectGuid DungeonClearBlockingDoorValue::Calculate()
 
     float const botX = bot->GetPositionX();
     float const botY = bot->GetPositionY();
-    size_t cursor = 0;
-    float bestSq = std::numeric_limits<float>::max();
-    for (size_t i = 0; i < pts.size(); ++i)
-    {
-        float const dx = pts[i].x - botX;
-        float const dy = pts[i].y - botY;
-        float const d2 = dx * dx + dy * dy;
-        if (d2 < bestSq)
-        {
-            bestSq = d2;
-            cursor = i;
-        }
-    }
+    float const botZ = bot->GetPositionZ();
+    size_t const cursor = DungeonClearMath::PathProgressCursor(pts, botX, botY, botZ);
 
     float prevX = botX;
     float prevY = botY;
-    float prevZ = bot->GetPositionZ();
+    float prevZ = botZ;
     float accumulated = 0.0f;
 
     struct Seg { float ax, ay, az, bx, by, bz; };
@@ -201,6 +217,11 @@ ObjectGuid DungeonClearBlockingDoorValue::Calculate()
         // checks; see DcEngageGeometry::IsDoorClosed.
         if (!DcEngageGeometry::IsDoorClosed(go))
             continue;
+        // Interact-THROUGH gates (Old Hillsbrad's prison door): the objective is
+        // completed from the players' side of the shut door and the event opens
+        // it itself — never flag one as blocking, never pause on it.
+        if (DcEventDoorRegistry::IsNavigationIgnored(go->GetEntry()))
+            continue;
         GameObjectTemplate const* tmpl = go->GetGOInfo();
 
         float const gx = go->GetPositionX();
@@ -238,7 +259,11 @@ ObjectGuid DungeonClearBlockingDoorValue::Calculate()
         // yet is GameObject-LOS-blocked near THIS door is transiting its shut
         // collision. Needs CheckGameObjectLoS=1; an OPEN door has no collision so
         // it never flags. Proximity-gated to this door so a stray solid GO can't
-        // attribute a block here.
+        // attribute a block here — and that proximity gate is 2D, so it carries
+        // the SAME floor test detector (1) applies. Without it, a leg on the
+        // storey below a door (10yd of Z in Shadowfang's tower, well inside the
+        // 12yd 2D band) that any unrelated solid GO happened to block got the
+        // block attributed to a door it ran nowhere near.
         bool crosses = false;
         for (auto const& seg : segments)
         {
@@ -252,8 +277,12 @@ ObjectGuid DungeonClearBlockingDoorValue::Calculate()
         if (!crosses)
         {
             constexpr float NEAR_SQ = 12.0f * 12.0f;
+            float doorLoZ, doorHiZ;
+            DoorZSpan(go, disp, doorLoZ, doorHiZ);
             for (auto const& seg : segments)
             {
+                if (!LegSharesDoorFloor(doorLoZ, doorHiZ, seg.az, seg.bz))
+                    continue;
                 if (DungeonClearMath::DistSqToSegment2D(gx, gy, seg.ax, seg.ay,
                                                         seg.bx, seg.by) > NEAR_SQ)
                     continue;

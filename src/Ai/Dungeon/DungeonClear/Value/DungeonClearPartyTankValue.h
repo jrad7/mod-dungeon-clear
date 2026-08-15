@@ -7,6 +7,7 @@
 #define _PLAYERBOT_DUNGEONCLEARPARTYTANKVALUE_H
 
 #include "Value.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
 class Player;
@@ -22,7 +23,7 @@ class DungeonClearPartyTankValue : public CalculatedValue<Player*>
 {
 public:
     DungeonClearPartyTankValue(PlayerbotAI* botAI)
-        : CalculatedValue<Player*>(botAI, "dungeon clear party tank", 2)
+        : CalculatedValue<Player*>(botAI, DcKey::PartyTank, 2)
     {
     }
 

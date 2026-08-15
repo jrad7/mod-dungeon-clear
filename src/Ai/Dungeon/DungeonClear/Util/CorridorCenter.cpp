@@ -9,7 +9,6 @@
 #include <cmath>
 #include <memory>
 
-#include "Config.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "DetourCommon.h"
 #include "DetourExtended.h"   // dtQueryFilterExt
@@ -50,6 +49,12 @@ namespace
     // Wall / findNearestPoly are local searches — they do not need the
     // dungeon-length pool the primary producer allocates.
     constexpr int CC_NODE_POOL = 2048;
+
+    // A point counts as "moved" by the centering pass (and so a smoothing
+    // candidate) when its accepted position differs from its original by more
+    // than this. Below it the push is visually nil and can't seed a sawtooth,
+    // so smoothing it would spend raycasts for no change. Squared, in yd^2.
+    constexpr float CC_MOVED_EPS_SQ = 0.05f * 0.05f;
 
     using ManagedQuery = std::unique_ptr<dtNavMeshQuery, decltype(&dtFreeNavMeshQuery)>;
 
@@ -93,17 +98,44 @@ namespace
     // snapshot per pass) so the smoothing is symmetric, not direction-biased.
     // Every averaged point is re-pinned to a walkable Z and reverted if it would
     // leave the mesh; the producer's LOS screen still runs afterwards.
+    //
+    // Only points the centering pass actually pushed (`moved`) can carry the
+    // sawtooth this exists to remove; untouched points are the raw taut
+    // polyline (collinear runs → the 1-2-1 average is identically the point
+    // itself), and re-validating them ran the bulk of Finalize's per-install
+    // map-thread cost — UpdateAllowedPositionZ + OnMesh + 2 raycasts per point,
+    // every install — for a guaranteed no-op. So restrict the pass to the moved
+    // points and their neighbourhood. Each Jacobi pass reads the previous
+    // pass's snapshot, so a push at index m ripples at most one point further
+    // out per pass; dilating the mask by `iterations` on each side makes the
+    // restricted pass bit-for-bit identical to the old unconditional pass on
+    // every point it still touches (points outside can provably never change).
     void SmoothPolyline(dtNavMeshQuery const* query, dtQueryFilter const* filter,
-                        Player* bot, std::vector<G3D::Vector3>& pts, int iterations)
+                        Player* bot, std::vector<G3D::Vector3>& pts, int iterations,
+                        std::vector<bool> const& moved)
     {
         if (iterations <= 0 || pts.size() < 3)
             return;
+
+        std::vector<bool> active(pts.size(), false);
+        size_t const reach = static_cast<size_t>(iterations);
+        for (size_t i = 0; i < moved.size() && i < pts.size(); ++i)
+        {
+            if (!moved[i])
+                continue;
+            size_t const lo = i > reach ? i - reach : 0;
+            size_t const hi = std::min(pts.size() - 1, i + reach);
+            for (size_t j = lo; j <= hi; ++j)
+                active[j] = true;
+        }
 
         for (int it = 0; it < iterations; ++it)
         {
             std::vector<G3D::Vector3> const src = pts;  // stable snapshot (Jacobi)
             for (size_t i = 1; i + 1 < src.size(); ++i)
             {
+                if (!active[i])
+                    continue;
                 if (std::fabs(src[i].z - src[i - 1].z) > JUMP_DZ ||
                     std::fabs(src[i + 1].z - src[i].z) > JUMP_DZ)
                     continue;
@@ -160,6 +192,10 @@ void CorridorCenter::Center(dtNavMeshQuery const* query, dtQueryFilter const* fi
     // Wide enough to see the OPPOSITE wall of a corridor up to ~2*clearance
     // wide, so the midpoint correction below can converge to the medial axis.
     float const searchRadius = params.clearance * 2.0f + 2.0f;
+
+    // Which interior points this pass actually pushed off the raw line — the
+    // only ones the following smoothing pass needs to touch (see SmoothPolyline).
+    std::vector<bool> moved(pts.size(), false);
 
     // Never move the start (index 0) or the target (last point).
     for (size_t i = 1; i + 1 < pts.size(); ++i)
@@ -225,11 +261,15 @@ void CorridorCenter::Center(dtNavMeshQuery const* query, dtQueryFilter const* fi
             // Pull halfway back toward the original point and retry.
             cand = (cand + pts[i]) * 0.5f;
         }
+        if ((accepted - pts[i]).squaredLength() > CC_MOVED_EPS_SQ)
+            moved[i] = true;
         pts[i] = accepted;
     }
 
-    // Pull the per-point sawtooth back into a flowing line.
-    SmoothPolyline(query, filter, bot, pts, params.smoothIters);
+    // Pull the per-point sawtooth back into a flowing line — only around the
+    // points the loop above actually pushed (moved); the rest is untouched raw
+    // corridor that the 1-2-1 average leaves exactly where it is.
+    SmoothPolyline(query, filter, bot, pts, params.smoothIters, moved);
 }
 
 void CorridorCenter::Center(Player* bot, std::vector<G3D::Vector3>& pts, Params const& params)

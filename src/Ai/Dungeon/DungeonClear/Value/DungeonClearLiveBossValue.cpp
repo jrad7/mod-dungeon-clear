@@ -12,6 +12,7 @@
 #include "Player.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Playerbots.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 DungeonClearLiveBoss DungeonClearLiveBossValue::Calculate()
 {
@@ -19,7 +20,7 @@ DungeonClearLiveBoss DungeonClearLiveBossValue::Calculate()
     if (!bot || !bot->IsInWorld())
         return out;
 
-    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, "next dungeon boss");
+    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
     if (!next.has_value())
         return out;
     out.entry = next->entry;

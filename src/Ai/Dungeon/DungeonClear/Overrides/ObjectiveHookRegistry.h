@@ -7,6 +7,7 @@
 #define _PLAYERBOT_OBJECTIVEHOOKREGISTRY_H
 
 #include <functional>
+#include <unordered_map>
 
 #include "Common.h"
 
@@ -36,11 +37,47 @@ class ObjectiveHookRegistry
 {
 public:
     using Hook = std::function<ObjectiveArriveResult(Player*, AiObjectContext*, DungeonBossInfo const&)>;
+    using HookTable = std::unordered_map<uint32, Hook>;
 
-    // Runs the hook for `hookId`. Returns Done when `hookId` is 0 or unregistered
-    // (the arrive-then-continue default).
+    // Registers `hook` under `id` in a table under construction. Use this rather
+    // than table.emplace() from the per-dungeon appenders below: hook ids are one
+    // FLAT space shared by every dungeon (unlike event conditions, which are
+    // function pointers and need no ids at all), so a copy-paste that reuses an id
+    // is a live hazard. emplace() would silently keep the first row and drop the
+    // second — the losing dungeon's objective then latches Done and its event
+    // never runs, with nothing in the log to say so. This LOG_ERRORs the collision
+    // and keeps the first row; the registry-integrity gtest fails on it at author
+    // time. id 0 is reserved for "no hook" and is rejected the same way.
+    static void AddHook(HookTable& table, uint32 id, Hook hook);
+
+    // Runs the hook for `hookId`. hookId 0 means "no hook" and returns Done (the
+    // arrive-then-continue default). A NON-ZERO hookId that is unregistered is an
+    // authoring error — the objective/step meant to DO something — so it returns
+    // Blocked (and LOG_WARNs once) rather than silently latching Done. See F2 in
+    // the events-system review; the registry-integrity gtest catches it at author
+    // time, this is the runtime backstop.
     static ObjectiveArriveResult Run(uint32 hookId, Player* bot, AiObjectContext* context,
                                      DungeonBossInfo const& info);
+
+    // True if `hookId` names a registered hook (cheap authoring sanity gate;
+    // hookId 0 is "no hook" and returns false). Used by the registry-integrity
+    // gtest and callers that want to distinguish "no hook" from "broken hook".
+    static bool Has(uint32 hookId);
 };
+
+// --- per-dungeon hook appenders ------------------------------------------
+// A dungeon gets its own hook TU only when its on-arrival behaviour is a
+// CONTROLLER rather than a one-shot action — i.e. when it re-decides from live
+// world state every tick and has to own movement/engagement/selection itself.
+// One-shot arrival actions (fire a cannon, grant an item, poke an NPC) stay in
+// ObjectiveHookRegistry.cpp's table, where they are homogeneous and short; there
+// is no gain in scattering nine ~90-line functions across nine files.
+//
+// Called EXPLICITLY from Hooks() for the same reason the event tables are: this
+// module compiles into a static lib, so a TU whose only output is constructor
+// side-effects gets dropped by the linker and its hooks silently vanish.
+//
+// The Black Morass (map 269) — the wave driver. See BlackMorassDriver.cpp.
+void RegisterBlackMorassHooks(ObjectiveHookRegistry::HookTable& out);
 
 #endif

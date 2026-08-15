@@ -62,6 +62,19 @@ struct DungeonBossInfo
     // for completion detection. Resolved and cleared by BossRosterRegistry::Apply.
     uint32 inheritCompletionFrom{0};
 
+    // Boss only: completion via the instance script's OWN boss-state slot
+    // (InstanceScript::GetBossState(index) == DONE), for a boss that has NO
+    // DungeonEncounter.dbc entry — so it never sets a GetCompletedEncounterMask
+    // bit and can't be tracked the normal way (e.g. The Mechanar's two
+    // Gatewatchers: door-gating mini-bosses the DBC doesn't list, but the
+    // instance script does track as DATA_GATEWATCHER_* / bosses[] slots). This is
+    // the ONE sanctioned use of GetBossState (which is otherwise banned here — its
+    // DATA_* index space only aligns with the DBC encounterIndex by coincidence):
+    // the index is authored EXPLICITLY from the instance header, not reused from
+    // encounterIndex, so there is no index-space confusion. -1 => not used
+    // (completion keys on the DBC mask / corpse as usual).
+    int32 doneBossStateIndex{-1};
+
     // Clear-ORDER override. When >= 0 the clear orders this anchor by this value
     // INSTEAD of encounterIndex, while completion still keys on encounterIndex
     // (the real DBC kill-bit, untouched). Lets a roster patch reorder a real

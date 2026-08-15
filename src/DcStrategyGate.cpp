@@ -4,6 +4,7 @@
  */
 
 #include "DcStrategyGate.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
 #include "Map.h"
 #include "ObjectAccessor.h"
@@ -16,6 +17,7 @@
 #include "Ai/Dungeon/DungeonClear/Action/DcActionShared.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcFollowerLifecycle.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 namespace
 {
@@ -38,12 +40,12 @@ namespace
     {
         AiObjectContext* ctx = botAI->GetAiObjectContext();
 
-        if (ctx->GetValue<bool>("dungeon clear enabled")->Get())
+        if (DcRun::Of(ctx).enabled)
             DcActionShared::DisableDungeonClear(
                 botAI, "Left the dungeon \xe2\x80\x94 dungeon clear disabled.");
 
         ObjectGuid& followed =
-            ctx->GetValue<ObjectGuid>("dungeon clear followed tank")->RefGet();
+            ctx->GetValue<ObjectGuid>(DcKey::FollowedTank)->RefGet();
         if (!followed.IsEmpty())
         {
             DcMovement::StopBot(bot, DcMovement::Stop::Hold);
@@ -70,32 +72,43 @@ namespace DcStrategyGate
         bool const hasNon = botAI->HasStrategy(kNonCombat, BOT_STATE_NON_COMBAT);
         bool const hasCmb = botAI->HasStrategy(kCombat, BOT_STATE_COMBAT);
 
+        // Each strategy in the engine it does NOT belong to. Never correct; see
+        // the Plan comment in the header for how a bot gets into that state and
+        // why it is otherwise permanent.
+        bool const strayInCmb = botAI->HasStrategy(kNonCombat, BOT_STATE_COMBAT);
+        bool const strayInNon = botAI->HasStrategy(kCombat, BOT_STATE_NON_COMBAT);
+
         // Per-engine decision via the pure kernel. The two engines are installed
         // and stripped together, but each is checked independently so a partial
         // state (e.g. a reset that rebuilt only one engine) self-heals.
-        Action const nonAction = Decide(inDungeon, hasNon);
-        Action const cmbAction = Decide(inDungeon, hasCmb);
+        Plan const plan = MakePlan(inDungeon, hasNon, hasCmb, strayInCmb, strayInNon);
 
-        if (nonAction == Action::None && cmbAction == Action::None)
+        if (plan.nonCombat == Action::None && plan.combat == Action::None &&
+            !plan.stripStrayInCombat && !plan.stripStrayInNonCombat)
             return;  // already compliant — the hot path
 
-        // Run the strip cleanup once, before removing either engine's strategy,
-        // so the run state is torn down while its values/actions still exist.
-        if (nonAction == Action::Strip || cmbAction == Action::Strip)
+        // Run the strip cleanup once, before removing any strategy, so the run
+        // state is torn down while its values/actions still exist.
+        if (plan.teardown)
             TeardownOnStrip(botAI, bot);
 
-        switch (nonAction)
+        switch (plan.nonCombat)
         {
             case Action::Install: botAI->ChangeStrategy("+dungeon clear", BOT_STATE_NON_COMBAT); break;
             case Action::Strip:   botAI->ChangeStrategy("-dungeon clear", BOT_STATE_NON_COMBAT); break;
             case Action::None:    break;
         }
-        switch (cmbAction)
+        switch (plan.combat)
         {
             case Action::Install: botAI->ChangeStrategy("+dungeon clear combat", BOT_STATE_COMBAT); break;
             case Action::Strip:   botAI->ChangeStrategy("-dungeon clear combat", BOT_STATE_COMBAT); break;
             case Action::None:    break;
         }
+
+        if (plan.stripStrayInCombat)
+            botAI->ChangeStrategy("-dungeon clear", BOT_STATE_COMBAT);
+        if (plan.stripStrayInNonCombat)
+            botAI->ChangeStrategy("-dungeon clear combat", BOT_STATE_NON_COMBAT);
     }
 
     void ReconcileAllBots()

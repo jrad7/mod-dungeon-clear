@@ -8,6 +8,7 @@
 
 #include "ObjectGuid.h"
 #include "Value.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
 
@@ -34,7 +35,7 @@ public:
         // boss well within DC_ENGAGE_RANGE (a patrolling boss covers <2yd in
         // 250ms). Callers re-resolve the GUID to a live position each tick, so
         // this interval bounds only how often the scan re-runs.
-        : CalculatedValue<DungeonClearLiveBoss>(botAI, "dungeon clear live boss", 250)
+        : CalculatedValue<DungeonClearLiveBoss>(botAI, DcKey::LiveBoss, 250)
     {
     }
 

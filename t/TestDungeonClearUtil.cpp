@@ -18,6 +18,8 @@
 #include "World.h"
 #include "WorldMock.h"
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
+#include "Ai/Dungeon/DungeonClear/DcRunState.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "ScriptMgr.h"
 #include "ScriptDefines/MiscScript.h"
@@ -288,6 +290,7 @@ TEST_F(DungeonClearUtilTest, NullptrSafetyChecks)
     EXPECT_FALSE(DcPartyState::IsAnyPartyMemberLooting(nullptr));
     EXPECT_FALSE(DcEngageGeometry::IsReachable(nullptr, 0.0f, 0.0f, 0.0f));
     EXPECT_FALSE(DcEngageGeometry::IsLevelReachable(nullptr, nullptr));
+    EXPECT_FALSE(DcEngageGeometry::IsDisplayedDead(nullptr));
     EXPECT_EQ(DcTargeting::FindBlockingTrash(nullptr, {}, 10.0f, 1.0f, {}), nullptr);
     EXPECT_EQ(DcTargeting::FindBlockingTrashCorridor(nullptr, {}, 10.0f, 5.0f, {}), nullptr);
 }
@@ -520,13 +523,13 @@ protected:
         botAI = new MockPlayerbotAI(player, context);
         context->SetAI(botAI);
 
-        // Register default values for context
-        context->SetValue<bool>("dungeon clear enabled", false);
-        context->SetValue<bool>("dungeon clear paused", false);
+        // Register default values for context. The run-level state (enabled /
+        // paused / pause reason + door / selected boss / leader-fight latches) is
+        // one owned struct now — DcRunState, read via DcRun::Of.
+        context->SetRefValue<DcRunState>("dungeon clear run state", DcRunState{});
         context->SetValue<std::optional<DungeonBossInfo>>("next dungeon boss", std::nullopt);
         context->SetRefValue<std::unordered_set<uint32>>("dungeon clear skipped", {});
         context->SetRefValue<std::string>("dungeon clear stall reason", "");
-        context->SetRefValue<std::string>("dungeon clear pause reason", "");
         context->SetValue<Unit*>("current target", nullptr);
         context->SetValue<ObjectGuid>("dungeon clear blocking door", ObjectGuid::Empty);
         context->SetValue<bool>("has available loot", false);
@@ -572,8 +575,8 @@ TEST_F(DungeonClearStatusTest, StatusDisabled)
 // generic hold so the panel never shows an empty paused state.
 TEST_F(DungeonClearStatusTest, StatusPaused)
 {
-    context->SetValue<bool>("dungeon clear enabled", true);
-    context->SetValue<bool>("dungeon clear paused", true);
+    DcRun::Of(context).enabled = true;
+    DcRun::Of(context).paused = true;
 
     std::string expected = "STATUS\t1\t0\tNone\t\t0\tpaused\tholding position\t0\t0";
     EXPECT_EQ(DcStatusPublisher::BuildStatusPayload(botAI), expected);
@@ -583,10 +586,9 @@ TEST_F(DungeonClearStatusTest, StatusPaused)
 // the tank can't open): the reason rides in the detail field for the panel.
 TEST_F(DungeonClearStatusTest, StatusPausedWithReason)
 {
-    context->SetValue<bool>("dungeon clear enabled", true);
-    context->SetValue<bool>("dungeon clear paused", true);
-    context->SetRefValue<std::string>("dungeon clear pause reason",
-                                      "a closed door is blocking the path");
+    DcRun::Of(context).enabled = true;
+    DcRun::Of(context).paused = true;
+    DcRun::Of(context).pauseReason = "a closed door is blocking the path";
 
     std::string expected =
         "STATUS\t1\t0\tNone\t\t0\tpaused\ta closed door is blocking the path\t0\t0";
@@ -601,7 +603,7 @@ TEST_F(DungeonClearStatusTest, StatusPausedWithReason)
 // report is the generic stall, not a door claim we can't verify.
 TEST_F(DungeonClearStatusTest, StatusStalledDoorUnverifiedFallsBackToStalled)
 {
-    context->SetValue<bool>("dungeon clear enabled", true);
+    DcRun::Of(context).enabled = true;
     context->SetRefValue<std::string>("dungeon clear stall reason", "door_blocked");
     context->SetValue<ObjectGuid>("dungeon clear blocking door", ObjectGuid(uint64(12345)));
 
@@ -612,7 +614,7 @@ TEST_F(DungeonClearStatusTest, StatusStalledDoorUnverifiedFallsBackToStalled)
 // Test status push when looting
 TEST_F(DungeonClearStatusTest, StatusLooting)
 {
-    context->SetValue<bool>("dungeon clear enabled", true);
+    DcRun::Of(context).enabled = true;
     context->SetValue<bool>("has available loot", true);
 
     std::string expected = "STATUS\t1\t0\tNone\t\t0\tlooting\tCollecting loot.\t0\t0";
@@ -622,7 +624,7 @@ TEST_F(DungeonClearStatusTest, StatusLooting)
 // Test status push when fighting trash
 TEST_F(DungeonClearStatusTest, StatusFightingTrash)
 {
-    context->SetValue<bool>("dungeon clear enabled", true);
+    DcRun::Of(context).enabled = true;
     player->SetUnitFlag(UNIT_FLAG_IN_COMBAT); // make bot IsInCombat() return true
 
     // Set up a mock target player named "Goblin"

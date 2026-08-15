@@ -13,6 +13,16 @@ raw material for RoomClusterRegistry.
 This is a DISCOVERY aid, not the source of truth: the roomWide flag is curated
 per boss (wave/event encounters must stay off). Re-run after content changes.
 
+OFFLINE DEV TOOL — not part of the running module. It is not compiled in, not
+invoked by any hook/tick/command, and never executed by worldserver; a developer
+runs it by hand. It issues a single SELECT against acore_world and writes
+nothing, so it cannot affect a running server or a connected client. See
+tools/README.md.
+
+The spawn-entry column was renamed `creature.id1` -> `creature.id` upstream;
+this tool probes information_schema and uses whichever one the DB has, matching
+the SFINAE fallback in src/.../Data/CreatureSpawnEntry.h.
+
 Usage:
   python3 tools/room_aggro_scan.py [--eps 16] [--ztol 12] [--min 6] \
       [--host 127.0.0.1] [--user acore] [--pass acore] [--db acore_world]
@@ -47,25 +57,44 @@ DUNGEON_MAPS = {
 SKIP_FACTIONS = {35, 31, 7, 12, 55, 114, 188}
 
 
-def fetch(args):
-    sql = (
-        "SELECT c.guid, c.map, c.id1, ct.name, ct.rank, ct.type, ct.faction, "
-        "c.position_x, c.position_y, c.position_z, "
-        "CASE WHEN ie.creditEntry IS NULL THEN 0 ELSE 1 END AS is_boss "
-        "FROM creature c "
-        "JOIN creature_template ct ON ct.entry = c.id1 "
-        "LEFT JOIN instance_encounters ie "
-        "  ON ie.creditEntry = c.id1 AND ie.creditType = 0 "
-        "WHERE c.map IN (" + ",".join(str(m) for m in DUNGEON_MAPS) + ")"
-    )
+def mysql(args, sql):
     out = subprocess.run(
         ["mysql", "-h", args.host, "-u", args.user, "-p" + args.password,
          args.db, "-N", "-B", "-e", sql],
         capture_output=True, text=True)
     if out.returncode != 0:
-        sys.exit("mysql failed: " + out.stderr)
+        sys.exit("mysql failed: " + out.stderr.strip())
+    return out.stdout
+
+
+def spawn_entry_column(args):
+    """`creature.id1` on older schemas, `creature.id` after the upstream rename."""
+    found = set(mysql(args,
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'creature' "
+        "AND COLUMN_NAME IN ('id', 'id1')").split())
+    for candidate in ("id1", "id"):
+        if candidate in found:
+            return candidate
+    sys.exit("creature table has neither an `id` nor an `id1` column — "
+             "is " + args.db + " really a world DB?")
+
+
+def fetch(args):
+    entry = spawn_entry_column(args)
+    sql = (
+        f"SELECT c.guid, c.map, c.{entry}, ct.name, ct.rank, ct.type, ct.faction, "
+        "c.position_x, c.position_y, c.position_z, "
+        # EXISTS, not a LEFT JOIN: a boss that is an encounter on both normal and
+        # heroic has two instance_encounters rows and a join would emit it twice.
+        "EXISTS (SELECT 1 FROM instance_encounters ie "
+        f"        WHERE ie.creditEntry = c.{entry} AND ie.creditType = 0) AS is_boss "
+        "FROM creature c "
+        f"JOIN creature_template ct ON ct.entry = c.{entry} "
+        "WHERE c.map IN (" + ",".join(str(m) for m in DUNGEON_MAPS) + ")"
+    )
     rows = []
-    for line in out.stdout.splitlines():
+    for line in mysql(args, sql).splitlines():
         f = line.split("\t")
         if len(f) < 11:
             continue

@@ -104,6 +104,43 @@ public:
     static float RouteDeviation(Player* bot, ChunkedPathfinder::Result const& path,
                                 DungeonFollowerState const& state);
 
+    // The route point the follower cursor currently anchors to — the same point
+    // RouteDeviation measures its 2D perpendicular distance around. nullopt when
+    // the cursor is past the path end. Exposed so callers can add a vertical
+    // (Z) displacement check alongside the 2D-only deviation, since a bot on a
+    // different floor directly under/over its route reads deviation ~= 0.
+    static std::optional<G3D::Vector3> CurrentPoint(ChunkedPathfinder::Result const& path,
+                                                    DungeonFollowerState const& state);
+
+    // True when the cursor's next hop lies BEHIND the bot along the route — the
+    // bot has been carried PAST its own cursor and walking to the hop is walking
+    // backward over ground it already covered.
+    //
+    // RouteDeviation cannot see this: it is a PERPENDICULAR distance, so a bot
+    // 10yd further along the same corridor reads as barely off the line, and the
+    // off-line rejoin then issues a MoveTo to the point behind it. That is the
+    // short backward step the tank does on approach — glide forward, cursor
+    // lags, walk back to it, re-anchor, glide forward again. DC_REANCHOR_DISTANCE
+    // was written for exactly this ("would otherwise make NextHop target a point
+    // behind the tank and walk it backward") but only fires past 12yd of
+    // staleness, while the off-line rejoin fires at 6yd of deviation — so the
+    // 6-12yd band was left to walk backward.
+    //
+    // Direction is the route tangent at the cursor (cursor -> next point, or
+    // previous -> cursor at a segment tail), 2D: a hop directly below/above is a
+    // floor problem, not a facing one. False when the route has no resolvable
+    // heading — callers must degrade to their existing behaviour, never to a
+    // freeze.
+    static bool HopIsBehind(Player* bot, ChunkedPathfinder::Result const& path,
+                            DungeonFollowerState const& state, Hop const& hop);
+
+    // Pure core of HopIsBehind: true when (pX,pY) sits on the far side of the bot
+    // from the route heading (dirX,dirY) — i.e. reaching it means travelling
+    // against the route. A degenerate heading returns false (unknowable, so leave
+    // the caller's behaviour alone).
+    static bool PointIsBehind(float botX, float botY, float pX, float pY,
+                              float dirX, float dirY);
+
     // Walks a window of polyline points AT OR AHEAD of the current state
     // (never behind it — the escort is one-way, so the cursor must not
     // regress to already-cleared corridor), picks the one closest to the
@@ -134,11 +171,36 @@ public:
     // (jumpDown/jumpGap) — jumps need MoveJump, not a spline — so callers
     // still drive jump points through the per-hop JumpTo branch.
     //
+    // maxYards: stop the window once its accumulated 3D length reaches this many
+    // yards (0 = unbounded, the historical behaviour). A spline window is a
+    // MOVEMENT COMMITMENT — while the glide is healthy Advance performs no route
+    // evaluation at all — so an unbounded window on a long route commits the tank
+    // to ~400yd of unobserved travel, far past the ~35yd blocking-trash
+    // lookahead (the heroic over-pull transit leg). The window always contains
+    // at least one polyline point past the live position when one exists, so a
+    // cap smaller than the next leg degrades to a single-hop window rather than
+    // to an empty one (which would drop the caller into the MoveTo fallback and
+    // reintroduce the per-point stutter).
+    //
     // Pure read of `state` (does not mutate the cursor). Returns fewer than 2
     // points when the immediate next leg is a jump or the route is exhausted,
     // signalling the caller to fall back to single-hop movement.
     static std::vector<G3D::Vector3> BuildSplineWindow(Player* bot,
-        ChunkedPathfinder::Result const& path, DungeonFollowerState const& state);
+        ChunkedPathfinder::Result const& path, DungeonFollowerState const& state,
+        float maxYards = 0.0f);
+
+    // Pure collection core of BuildSplineWindow (no Player — gtested directly).
+    // Appends consecutive polyline points from cursor (seg, pt) to `window`,
+    // which must already hold the live-position seed as its last element (length
+    // accumulation starts from window.back()). Stops at the first jump leg, at
+    // MAX_SPLINE_WINDOW_POINTS total, and — when maxYards > 0 — as soon as the
+    // accumulated 3D length of the appended run reaches maxYards. The point that
+    // CROSSES the cap is still appended (the window crosses the cap rather than
+    // stopping short of it), and the cap is only tested after a point has been
+    // appended, so at least one forward point always survives any cap.
+    static void AppendWindowPoints(ChunkedPathfinder::Result const& path,
+                                   uint32 seg, uint32 pt, float maxYards,
+                                   std::vector<G3D::Vector3>& window);
 };
 
 #endif

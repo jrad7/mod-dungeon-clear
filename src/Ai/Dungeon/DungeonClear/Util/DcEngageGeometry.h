@@ -7,10 +7,13 @@
 #define _DC_ENGAGE_GEOMETRY_H
 
 #include <optional>
+#include <vector>
 
 #include "MoveSplineInitArgs.h"
+#include "ObjectGuid.h"
 #include "Position.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
 
 class Player;
 class Unit;
@@ -34,6 +37,29 @@ public:
     // return `fallback`. Cheap — no allocation, no pathfinding.
     static float AggroRangeOf(Player* bot, Unit* u, float fallback,
                               float floorYd, float capYd);
+
+    // THE single source for the aggro-reach formula — the distance at which `u`
+    // notices `bot`, expressed as a radius around `u`:
+    //   GetAggroRange(bot) + u's reach + bot's reach + AggroRangeMargin
+    //   + partyBuffer
+    // `partyBuffer` is the extra slack an AVOIDANCE wants and a DETECTION does
+    // not: avoidance is steering the whole party past the pack (followers cut
+    // corners), detection is only asking "will this thing pull". Callers:
+    //   detection  (AggroRangeOf)          -> partyBuffer = 0
+    //   avoidance  (BystanderSpheres)      -> partyBuffer = PullEnRouteMargin
+    //   boss skirt (RoomAggroSphereRadius) -> partyBuffer = RoomAggroPathPadding
+    //   hand-offs  (BossEngageRange, PullCommitRange) -> partyBuffer = 0
+    // Extracting it is what ends the drift where the blocking-trash band and the
+    // avoid sphere disagreed about the same fact by ~3.5yd (the code comment in
+    // BystanderSpheres promised they "can never disagree"; they did). Returns 0
+    // for null/non-creature inputs. No clamping — callers clamp to their own
+    // floors/caps.
+    static float AggroReach(Player* bot, Unit* u, float partyBuffer);
+
+    // The pure formula behind AggroReach, separated so the invariant "detection
+    // and avoidance agree up to partyBuffer" is gtestable without a live map.
+    static float AggroReachYards(float aggroRange, float mobReach, float botReach,
+                                 float aggroMargin, float partyBuffer);
 
     // The distance at which the tank should consider itself "at the boss" and
     // hand off from the smooth long-path/direct-pursuit glide to the decisive
@@ -101,9 +127,55 @@ public:
     // flipping back toward the target every tick and bouncing between two ring
     // points forever. Pass nullptr for a one-shot, latch-free skirt (followers).
     // Reset to 0 by this function the instant the straight approach clears.
+    //
+    // `profile` picks the ring the orbit rides — see OrbitProfile.
+    enum class OrbitProfile : uint8
+    {
+        // A room-aggro BOSS, the case this function was written for. The orbit
+        // rides a FIXED wide ring (safeRadius + RoomAggroPartyMargin), so a tank
+        // standing inside it deliberately backs out to the ring before arcing.
+        // Correct there: the boss must not be woken at all, the whole room-clear
+        // happens from outside that ring, and the backing-out is a one-time cost
+        // paid at the start of a long orbit.
+        RoomAggroBoss,
+        // A BYSTANDER trash pack the tank is merely walking past. Rides the
+        // tank's OWN current stand-off instead of a fixed ring, so the step is
+        // purely tangential — never radially in, never radially out.
+        //
+        // The fixed ring is wrong here and it showed: safeRadius already carries
+        // PullEnRouteMargin, so the boss ring added a SECOND party buffer
+        // (RoomAggroPartyMargin, 10) on top, putting the waypoint ~40yd from a
+        // pack with ~15yd of real aggro. A 34-degree step at that radius is a
+        // ~23yd leg, most of it radial — the tank visibly ran BACKWARD away from
+        // the pack it was approaching. And backing out is itself what clears the
+        // bot->target line, so the very next tick the early-out fired, the detour
+        // was dropped, and the tank snapped forward again: an excursion that
+        // bought nothing and cost two reversals. Live heroic logged 73 of these,
+        // only 3 of which ran long enough to be given up on — the rest were
+        // one-tick round trips.
+        Bystander,
+    };
     static std::optional<Position> AggroSafeApproachPoint(
         Player* bot, float bx, float by, float bz, float safeRadius, Unit* target,
-        int8* orbitDir = nullptr);
+        int8* orbitDir = nullptr,
+        OrbitProfile profile = OrbitProfile::RoomAggroBoss);
+
+    // Pure: the ring radius and angular step one orbit tick should use, split out
+    // of AggroSafeApproachPoint so the "never radially outward, never radially
+    // inward" contract of the Bystander profile is gtestable without a live map.
+    //
+    // Bystander also bounds the LEG rather than the ANGLE: a fixed 34-degree step
+    // is a 12yd leg at 20yd of stand-off and a 35yd leg at 60yd, and the long one
+    // is a committed MoveTo the next tick may throw away. Capping the chord keeps
+    // one sidestep cheap enough to abandon.
+    struct OrbitStep
+    {
+        float radius = 0.0f;   // distance from the sphere centre to place the waypoint
+        float step = 0.0f;     // radians of arc for this tick
+    };
+    static OrbitStep OrbitRing(OrbitProfile profile, float safeRadius,
+                               float botRadius, float partyMargin,
+                               float maxLegYards);
 
     // The chooser behind AggroSafeApproachPoint, factored out as pure geometry so
     // it can be unit-tested without a live map: true when the straight 2D line
@@ -115,6 +187,186 @@ public:
     static bool NeedsRoomAggroSkirt(float botX, float botY,
                                     float targetX, float targetY,
                                     float bossX, float bossY, float avoidRadius);
+
+    // --- En-route pack avoidance ------------------------------------------
+    // One bystander pack's aggro sphere, as the avoidance sees it.
+    struct AvoidSphere
+    {
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        float r = 0.0f;          // aggro reach + reaches + margins
+        ObjectGuid guid;         // the mob the sphere is centred on (latch key)
+    };
+
+    // Pure: index of the sphere the straight 2D line bot->target violates FIRST,
+    // i.e. the violated sphere whose centre is nearest the bot; -1 when the line
+    // is clear of all of them.
+    //
+    // Nearest-first, rather than "worst" or "all at once", is what lets the
+    // proven single-sphere orbit do the work: the tank rounds the obstacle
+    // actually in front of it, and once past, the next violator becomes the
+    // nearest and the orbit re-aims at that. Trying to solve all spheres in one
+    // step is where a multi-sphere solver would have to invent geometry that
+    // AggroSafeApproachPoint has already had four bug-fix passes on.
+    static int FirstViolatedSphere(float botX, float botY,
+                                   float targetX, float targetY,
+                                   std::vector<AvoidSphere> const& spheres);
+
+    // Build the bystander avoid-sphere set around a leg of travel from the bot
+    // to `legEnd`. Extracted verbatim from EnRoutePackAvoidPoint's body so the
+    // pull leg and the Advance glide can never disagree about what "inside
+    // aggro" means: every sphere is sized
+    //   GetAggroRange(bot) + mob reach + bot reach + AggroRangeMargin
+    //   + PullEnRouteMargin
+    // and dead / non-hostile / critter / totem / already-in-combat / other-floor
+    // mobs never become spheres. `exclude` is the destination pack — by
+    // identity, formation id, or 12yd proximity — which must NEVER become an
+    // avoid sphere (it is what the caller is walking to); pass nullptr for
+    // Advance, which has no pack it is deliberately walking to. NOT gated on
+    // PullEnRouteAvoid — callers gate. One grid search per call.
+    static std::vector<AvoidSphere> BystanderSpheres(Player* bot,
+                                                     Position const& legEnd,
+                                                     Unit* exclude);
+
+    // Pure: first sphere any leg of `polyline` violates, or -1 when the whole
+    // polyline is clear. Writes the violating leg's START point index to
+    // `legOut` — polyline[legOut] is the last point still outside the sphere
+    // (when legOut > 0; legOut == 0 means the hazard is violated from the very
+    // first leg, i.e. effectively already at/inside it), so a caller that
+    // truncates its window to [0..legOut] glides up to the hazard's threshold
+    // and stops there.
+    //
+    // NOTE the deliberate contract difference from FirstViolatedSphere, which
+    // picks the violated sphere whose CENTRE IS NEAREST THE BOT (see its comment:
+    // it feeds a single-sphere orbit that re-aims as each obstacle is passed).
+    // Over a polyline "nearest the bot" is the wrong question — a route can
+    // double back, so the sphere to stop at is the one violated EARLIEST ALONG
+    // THE ROUTE, which may be further away in straight-line terms. Do not
+    // "unify" these two orderings; they answer different questions. Within one
+    // leg, ties break to the sphere centre nearest the leg start, which makes a
+    // 2-point polyline behave identically to FirstViolatedSphere.
+    static int FirstViolatedSphereOnPolyline(
+        std::vector<G3D::Vector3> const& polyline,
+        std::vector<AvoidSphere> const& spheres, size_t& legOut);
+
+    // Pure: the point along the segment a->b where it FIRST crosses INTO the
+    // circle (cx, cy, r), pulled `backoff` yards back along the segment so the
+    // walker parks a hair outside rather than exactly on the boundary (a stop
+    // dead on the edge reads as "inside" to the next tick and flip-flops). Z is
+    // interpolated. nullopt when `a` is already inside the circle (there is no
+    // threshold ahead of the walker to stop at), when the segment never reaches
+    // the circle, or when the backoff eats the whole approach.
+    static std::optional<G3D::Vector3> SegmentCircleEntry(
+        G3D::Vector3 const& a, G3D::Vector3 const& b,
+        float cx, float cy, float r, float backoff);
+
+    // Truncate a spline window (window[0] IS the walker's live position) at the
+    // first bystander sphere on it, so the glide runs up to that pack's aggro
+    // THRESHOLD and stops there out of combat. Returns true and rewrites
+    // `window` when the truncation is honourable; returns false leaving
+    // `window` UNTOUCHED when it is not.
+    //
+    // That second half is the whole point of this function. The first cut of
+    // this avoidance truncated to the last polyline VERTEX before the hazard
+    // (window.resize(legOut + 1)), which collapses the window to the lone seed
+    // point whenever the tank is at or inside a sphere — and a <2-point window
+    // is not a stop, it drops Advance into the legacy per-point MoveTo walk.
+    // Each hop then costs its own LastMovement delay, so the tank CRAWLED
+    // through the hazard at ~2yd/s instead of gliding past it at ~7. With
+    // heroic elites padded to ~30yd of reach the tank is nearly always inside
+    // someone's sphere, so that was most of the approach: live Sethekk heroic,
+    // 181 of 302 truncations collapsed to a single point — the "takes a few
+    // steps, stops, takes a few steps" report, and the same stutter-creep the
+    // spline window exists to kill (see BossEngageRange's header note).
+    //
+    // So: stop at the threshold, not at a vertex, and when the surviving glide
+    // would be shorter than `minGlideYards` — the tank is already at or inside
+    // the sphere, and there is no walk left to keep out of it — decline the
+    // truncation and let the caller glide through at full speed. Preference,
+    // never refusal, and never a crawl: the pack is still owned downstream by
+    // the blocking-trash detector (same formula, minus the party buffer) and by
+    // the pull pipeline's own orbit.
+    //
+    // `legOut` / `sphereOut` report the violation whether or not it was
+    // honoured, for logging and for the mid-glide probe's ignore latch;
+    // sphereOut is -1 when the window was clear.
+    static bool TruncateWindowAtSphere(std::vector<G3D::Vector3>& window,
+                                       std::vector<AvoidSphere> const& spheres,
+                                       float minGlideYards, float backoff,
+                                       size_t& legOut, int& sphereOut);
+
+    // A detour waypoint that keeps the walk to `target` out of every OTHER
+    // pack's aggro range, or nullopt when the straight approach is already clear
+    // (or avoidance is off / nothing can be snapped — always degrade to walking
+    // straight, never to standing still).
+    //
+    // Why this exists: the pull classifier estimates who joins a fight that
+    // STAYS PUT at the target. That is the right question for sizing the pull and
+    // the wrong one for getting there — a pack 40yd off the path aggros nothing
+    // by standing still, and everything when the tank jogs past it. Live Sethekk
+    // heroic: a pull predicted at 3 mobs was fought by 11, with three uninvolved
+    // packs sitting 36-64yd from the target. The verdict was right; the walk was
+    // not.
+    //
+    // Cost is bounded and this is deliberately NOT free: one grid search plus a
+    // handful of line tests per call. Gated by PullEnRouteAvoid (heroic-only by
+    // default) and intended for the leader tank's approach, not every bot.
+    static std::optional<Position> EnRoutePackAvoidPoint(Player* bot,
+                                                         AiObjectContext* ctx,
+                                                         Unit* target);
+
+    // True when `target` is itself STANDING INSIDE another pack's aggro sphere,
+    // i.e. there is no approach to it — however the route bends — that does not
+    // wake that pack. This is the half EnRoutePackAvoidPoint structurally cannot
+    // cover: it steers the LEG around spheres in the way, but a sphere containing
+    // the DESTINATION has no way around it, and the orbit's exit test ("a straight
+    // shot at the target clears the sphere") can never come true, so the tank
+    // either orbits until the borrow watchdog gives up or walks straight in.
+    //
+    // Same sizing as BystanderSpheres (AggroReach + PullEnRouteMargin) and the
+    // same exclusions (the target's own packmates by formation or 12yd proximity,
+    // dead / non-hostile / critter / totem / already-in-combat / other-floor), so
+    // "inside aggro" means one thing across the module. One grid search around the
+    // TARGET (not the leg), so it is cheaper than a full BystanderSpheres build.
+    // Armed by PullEnRouteAvoid (heroic) or EnRouteSweepApplies (normal); false
+    // when neither owns the difficulty.
+    static bool TargetInsideBystanderPack(Player* bot, Unit* target);
+
+    // Is the en-route pack SWEEP in force for this bot? A non-heroic dungeon on
+    // the RouteSweepRegistry allow-list — see that header for why the scope is a
+    // per-map table rather than a difficulty or a config key, and
+    // DcTargeting::FindEnRouteAggroPack for what the sweep does.
+    static bool EnRouteSweepApplies(Player* bot);
+
+    // Chase-leash gate: what the walk toward a live trash target should do this
+    // tick. Resolves the game state — the per-approach anchor (DcApproachState::
+    // chaseTarget/chaseAnchor/chaseOrigin), the drift, the hot-destination test —
+    // and hands the decision to the unit-tested DungeonClearMath::DecideChase.
+    //
+    // Re-anchors (and returns Follow) whenever the target changes, so the anchor
+    // is stamped on the first tick a walk to that mob is actually attempted: the
+    // moment we committed. Persists the hold latch back into the approach state,
+    // and re-anchors again on GiveUp so neither caller can be left holding a latch
+    // that reports GiveUp forever (see the note at the re-anchor).
+    //
+    // Exempt by construction: a target already IN COMBAT is a fight, not a pull —
+    // a mob kiting a follower must still be run down — and a leash of 0
+    // (PullChaseLeash) disables the gate entirely.
+    static DungeonClearMath::ChaseVerdict ChaseLeash(Player* bot,
+                                                     AiObjectContext* ctx,
+                                                     Unit* target);
+
+    // Stamp the chase anchor explicitly, for a caller that knows the exact moment
+    // the plan was made and does not walk on that same tick.
+    //
+    // The advanced pull is that caller: it COMMITS at the Idle->Forming edge (the
+    // camp is measured and the aggro estimate taken there) and then stands still
+    // for the whole Forming dwell while the party sets. Left to ChaseLeash's own
+    // lazy anchoring the anchor would be stamped on the first Advancing tick —
+    // seconds later, at wherever the pack had wandered to by then — and the leash
+    // would measure drift from a position the plan knows nothing about. Anchor at
+    // the commit and the leg is leashed to the ground the pull was actually
+    // planned against.
+    static void AnchorChase(Player* bot, AiObjectContext* ctx, Unit* target);
 
     // True when the tank is close enough AND on a navigable level with the boss
     // to hand off from route-following to the decisive engage pull. The 3D
@@ -173,6 +425,39 @@ public:
     // Non-creatures return false.
     static bool IsRangedAttacker(Player* bot, Unit* u);
 
+    // True when the server is presenting `u` to every client AS A CORPSE
+    // (UNIT_DYNFLAG_DEAD), even though it is technically alive. Two producers:
+    // a creature_template with `dynamicflags & 32` — decorative bodies strewn
+    // across a wing — and the feign-death aura effect, which sets the same bit
+    // on a dormant scripted mob.
+    //
+    // Such a unit is NOT a pack. It does not notice you, does not chase, and
+    // does not fight, so the two things this predicate guards are both wrong for
+    // it: giving it an AggroRangeOf avoidance sphere (there is no aggro to
+    // avoid), and picking it as blocking trash to walk over and kill. Note it
+    // still passes IsAlive() and, for the corpse props, IsHostileTo() — which is
+    // exactly why it needs its own test rather than falling out of the existing
+    // liveness/hostility gates.
+    //
+    // ROOT CAUSE of tr-20260801-204608-7 (Arcatraz heroic): entries 21303
+    // "Defender Corpse" / 21304 "Warder Corpse" are 1-HP proximity bombs already
+    // on the DcHazardRegistry table as avoidance-only emitters, but the engage
+    // layer read them as live hostile elites and handed each a 20.4yd sphere.
+    // The advance glide then declined to honour a sphere it was already standing
+    // in ("too close to honour") and glided an ESCORT window, while the engage
+    // rung picked a corpse as blocking trash and issued a POINT detour around a
+    // second corpse — and DcMoveTo's ResolveEscortConflict cancels an in-flight
+    // escort, so the two rungs clobbered each other's movement generator ~2x/sec
+    // for 8.5 minutes at posDelta=0.00yd until the party wiped.
+    //
+    // Deliberately generic rather than a registry lookup: the world has ~97 such
+    // templates over ~1000 spawns (Auchenai's "Slain Auchenai Warrior", Naxx's
+    // corpse piles, …), so keying on the flag fixes every wing at once instead of
+    // waiting for each to be hand-authored onto the hazard table. Where a prop
+    // IS also a registered hazard, that registry keeps owning its keep-out radius
+    // — this only stops the aggro layer from inventing a second, conflicting one.
+    static bool IsDisplayedDead(Unit const* u);
+
     // True when `go` is a navigation-blocking door currently in its CLOSED
     // (corridor-blocking) visual state. Encapsulates the startOpen-inverted
     // GOState test shared by the blocking-door scan and the door-reopened
@@ -182,6 +467,17 @@ public:
     // ignoredByPathing (authored always-passable), and null/out-of-world GOs
     // all read NOT closed.
     static bool IsDoorClosed(GameObject const* go);
+
+    // True only when a COMPLETE navmesh route (PATHFIND_NORMAL) exists from `bot`
+    // to `p`. The camp/trail walk-back pickers choose points off the breadcrumb
+    // trail, but a trail can span a navmesh seam (a drop-down, a ledge, a doorway)
+    // that is short in plan view yet not walkable in a straight line; probing the
+    // candidate with the same PathGenerator the move itself uses guarantees every
+    // committed point is reachable over a generated path, so the move never
+    // straight-lines under the map. Bounded cost: one Detour query per probe, and
+    // callers probe only points they would return. Single shared home for what
+    // were byte-identical file-local twins in DcPullPlanner and DcLeaderSignal.
+    static bool IsNavReachable(Player* bot, Position const& p);
 
     // True if a closed `GAMEOBJECT_TYPE_DOOR` sits on the straight 2D line from
     // `from` to (tx,ty), within `corridorWidth` of it, on the from/target floor

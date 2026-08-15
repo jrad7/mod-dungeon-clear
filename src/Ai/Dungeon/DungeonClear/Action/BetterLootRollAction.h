@@ -34,9 +34,17 @@
  * AFTER playerbots builds its own, this creator wins for every bot of every
  * class.
  *
- * Gated by the config flag DungeonClear.BetterLootRolling (default off). When
- * the flag is off — or the bot is not a self-bot (it has a separate human
- * master) — this behaves exactly like the stock LootRollAction.
+ * Gated by the config flag DungeonClear.BetterLootRolling (default off), which
+ * leaves this behaving exactly like the stock LootRollAction. With the flag on
+ * there are two cases and they do not overlap: a self-bot casts no vote at all
+ * (improvement #1), and every other bot gets improvement #2 on the over-level
+ * items and stock's own answer on everything else.
+ *
+ * Execute votes on every pending roll it is given, matching stock since
+ * mod-playerbots #2496 — which replaced "one item per Execute" with all of
+ * them. Matching matters here because, unlike stock, this action runs off a
+ * per-tick trigger (improvement #3): one item per tick would hold the action
+ * slot for as many ticks as the boss dropped items.
  */
 
 #ifndef _DUNGEONCLEAR_BETTERLOOTROLLACTION_H

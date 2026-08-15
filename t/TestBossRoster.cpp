@@ -6,6 +6,7 @@
 #include "gtest/gtest.h"
 
 #include <algorithm>
+#include <cmath>
 
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
@@ -61,7 +62,7 @@ TEST(BossRosterRegistryTest, UldamanAltarObjectivesSortBeforeArchaedas)
         Boss(4854, 6, "Grimlok", 70),
         Boss(2748, 7, "Archaedas", 70),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(70, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(70, DUNGEON_DIFFICULTY_NORMAL, base);
 
     int grimlokIdx = -1, keeperIdx = -1, archAltarIdx = -1, archaedasIdx = -1;
     for (int i = 0; i < (int)out.size(); ++i)
@@ -97,7 +98,7 @@ TEST(BossRosterRegistryTest, ZfSummitObjectiveSortsBeforeUkorz)
         Boss(7795, 0, "Hydromancer Velratha", 209),
         Boss(7267, 7, "Chief Ukorz Sandscalp", 209),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(209, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(209, DUNGEON_DIFFICULTY_NORMAL, base);
 
     int objIdx = -1, ukorzIdx = -1;
     for (int i = 0; i < (int)out.size(); ++i)
@@ -125,7 +126,7 @@ TEST(BossRosterRegistryTest, ZfGahzrillaObjectiveSortsAfterUkorz)
         Boss(7795, 0, "Hydromancer Velratha", 209),
         Boss(7267, 7, "Chief Ukorz Sandscalp", 209),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(209, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(209, DUNGEON_DIFFICULTY_NORMAL, base);
 
     int gahzIdx = -1, ukorzIdx = -1;
     for (int i = 0; i < (int)out.size(); ++i)
@@ -156,7 +157,7 @@ TEST(BossRosterRegistryTest, ZfFullClearOrder)
         Boss(7271, 4, "Witch Doctor Zum'rah", 209),
         Boss(7267, 7, "Chief Ukorz Sandscalp", 209),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(209, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(209, DUNGEON_DIFFICULTY_NORMAL, base);
 
     auto pos = [&](uint32 entry)
     {
@@ -195,6 +196,48 @@ TEST(BossRosterRegistryTest, ZfFullClearOrder)
 // BossSpawnIndex never emits it. The patch adds it explicitly at the lower
 // platform with DBC kill-bit 2 (set directly — there is no base entry to inherit
 // from), so the run does not stop one boss short.
+// The Mechanar Gatewatchers (Gyro-Kill 19218, Iron-Hand 19710) are NOT DBC
+// encounters (no instance_encounters KILL_CREATURE row), so BossSpawnIndex never
+// derives them and the auto-derived base holds only the three real bosses. The
+// patch must ADD them as bosses (Gyro-Kill order 1, Iron-Hand order 3, with
+// Capacitus reordered to 2 between them) with instance-boss-state completion
+// (doneBossStateIndex 0/1) and a no-DBC-bit encounterIndex, or the picker skips
+// straight to Capacitus and the party never opens the Mo'arg doors.
+TEST(BossRosterRegistryTest, MechanarAddsGatewatchersAheadOfCapacitus)
+{
+    // Base as BossSpawnIndex emits it — only the three DBC bosses.
+    std::vector<DungeonBossInfo> base = {
+        Boss(19219, 0, "Mechano-Lord Capacitus", 554),
+        Boss(19221, 1, "Nethermancer Sepethrea", 554),
+        Boss(19220, 2, "Pathaleon the Calculator", 554),
+    };
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(554, DUNGEON_DIFFICULTY_NORMAL, base);
+
+    DungeonBossInfo const* gyro = Find(out, 19218);
+    DungeonBossInfo const* iron = Find(out, 19710);
+    ASSERT_NE(gyro, nullptr) << "Gyro-Kill must be injected as a boss";
+    ASSERT_NE(iron, nullptr) << "Iron-Hand must be injected as a boss";
+
+    EXPECT_EQ(gyro->kind, DungeonAnchorKind::Boss);
+    EXPECT_EQ(iron->kind, DungeonAnchorKind::Boss);
+    // Completion is the instance boss-state slot, not a DBC bit.
+    EXPECT_EQ(gyro->doneBossStateIndex, 0);
+    EXPECT_EQ(iron->doneBossStateIndex, 1);
+    // encounterIndex parked past bit 31 so the completedMask check never matches
+    // a real boss's bit (default 0 would collide with DBC bit 0 = Capacitus).
+    EXPECT_GE(gyro->encounterIndex, 32u);
+    EXPECT_GE(iron->encounterIndex, 32u);
+
+    // Ordered first: Gyro-Kill(1) -> Capacitus(2) -> Iron-Hand(3) -> ...
+    // Capacitus sits between the Gatewatchers so the tank approaches his pit from
+    // Gyro-Kill (NW) and the SE Driller pack falls on the walk down to Iron-Hand
+    // (which is why the room-aggro pre-clear for 19219 was dropped).
+    ASSERT_GE(out.size(), 3u);
+    EXPECT_EQ(out[0].entry, 19218u);
+    EXPECT_EQ(out[1].entry, 19219u);
+    EXPECT_EQ(out[2].entry, 19710u);
+}
+
 TEST(BossRosterRegistryTest, HellfireRampartsAddsFinalBoss)
 {
     // Auto-derived list as BossSpawnIndex emits it (only the two spawned bosses).
@@ -202,7 +245,7 @@ TEST(BossRosterRegistryTest, HellfireRampartsAddsFinalBoss)
         Boss(17306, 0, "Watchkeeper Gargolmar", 543),
         Boss(17308, 1, "Omor the Unscarred", 543),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(543, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(543, DUNGEON_DIFFICULTY_NORMAL, base);
 
     DungeonBossInfo const* vaz = Find(out, 17537);
     ASSERT_NE(vaz, nullptr) << "Vazruden must be injected";
@@ -219,32 +262,46 @@ TEST(BossRosterRegistryTest, HellfireRampartsAddsFinalBoss)
     EXPECT_EQ(out[2].entry, 17537u);
 }
 
-// Stratholme dead side: the DBC puts the ziggurats (Baroness 7, Nerub'enkan 8,
-// Maleki 9) before Magistrate Barthilas (10), but the path runs Barthilas FIRST.
-// The patch re-adds Barthilas with orderOverride 6 (keeping kill-bit 10) so the
-// clear order becomes Barthilas -> ziggurats -> Slaughterhouse (11) -> Baron (12).
-//
-// The live side here is just Archivist Galford (bit 5). Balnazzar (bit 6) is NOT
-// auto-derived in production: its credit creature 10813 has no creature.sql spawn
-// (it exists only via Dathrohan's UpdateEntry), so BossSpawnIndex drops it — the
-// base list jumps Galford(5) -> Baroness(7). The patch fills the gap with a
-// Dathrohan objective (OBJ(2), eventId 5, bit 6).
-TEST(BossRosterRegistryTest, StratholmeBarthilasReorderedBeforeZiggurats)
+// Stratholme full clear-path order (issue #5). The DBC order is
+//   Unforgiven 0, Hearthsinger 1, Timmy 2, Cannon 3, Malor 4, Galford 5,
+//   Baroness 7, Nerub'enkan 8, Maleki 9, Barthilas 10, Baron 12
+// (Balnazzar bit 6 is NOT auto-derived: its credit creature 10813 has no
+// creature.sql spawn, so BossSpawnIndex drops it and the patch fills the gap
+// with a Dathrohan objective). Two structural problems: the DBC runs the
+// ziggurats before Barthilas though the path runs Barthilas first, and it lists
+// The Unforgiven / Hearthsinger Forresten first, forcing a full circle before
+// the live side. The patch stamps a contiguous 1..13 order key so the clear runs
+//   Timmy(1) -> Malor(2) -> Cannon(3) -> Galford(4) -> Dathrohan/Balnazzar(5) ->
+//   Unforgiven(6) -> Hearthsinger(7) -> Barthilas(8) -> Baroness(9) ->
+//   Nerub'enkan(10) -> Maleki(11) -> Slaughterhouse(12) -> Baron(13)
+// while every boss keeps its real DBC kill-bit (encounterIndex) untouched.
+TEST(BossRosterRegistryTest, StratholmeFullClearPathOrder)
 {
     std::vector<DungeonBossInfo> base = {
-        Boss(10811, 5, "Archivist Galford", 329),  // live side, last auto-derived
+        Boss(10516, 0, "The Unforgiven", 329),
+        Boss(10558, 1, "Hearthsinger Forresten", 329),
+        Boss(10808, 2, "Timmy the Cruel", 329),
+        Boss(10997, 3, "Cannon Master Willey", 329),
+        Boss(11032, 4, "Malor the Zealous", 329),
+        Boss(10811, 5, "Archivist Galford", 329),
         Boss(10436, 7, "Baroness Anastari", 329),
         Boss(10437, 8, "Nerub'enkan", 329),
         Boss(10438, 9, "Maleki the Pallid", 329),
         Boss(10435, 10, "Magistrate Barthilas", 329),
         Boss(10440, 12, "Baron Rivendare", 329),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(329, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(329, DUNGEON_DIFFICULTY_NORMAL, base);
 
-    int galfordIdx = -1, dathrohanIdx = -1, barthIdx = -1, baronessIdx = -1,
-        malekiIdx = -1, slaughterIdx = -1, baronIdx = -1;
+    int timmyIdx = -1, malorIdx = -1, cannonIdx = -1, unforgivenIdx = -1,
+        hearthIdx = -1, galfordIdx = -1, dathrohanIdx = -1, barthIdx = -1,
+        baronessIdx = -1, malekiIdx = -1, slaughterIdx = -1, baronIdx = -1;
     for (int i = 0; i < (int)out.size(); ++i)
     {
+        if (out[i].entry == 10808) timmyIdx = i;
+        if (out[i].entry == 11032) malorIdx = i;
+        if (out[i].entry == 10997) cannonIdx = i;
+        if (out[i].entry == 10516) unforgivenIdx = i;
+        if (out[i].entry == 10558) hearthIdx = i;
         if (out[i].entry == 10811) galfordIdx = i;
         if (out[i].kind == DungeonAnchorKind::Objective && out[i].eventId == 5u) dathrohanIdx = i;
         if (out[i].entry == 10435) barthIdx = i;
@@ -253,6 +310,11 @@ TEST(BossRosterRegistryTest, StratholmeBarthilasReorderedBeforeZiggurats)
         if (out[i].kind == DungeonAnchorKind::Objective && out[i].eventId == 4u) slaughterIdx = i;
         if (out[i].entry == 10440) baronIdx = i;
     }
+    ASSERT_GE(timmyIdx, 0);
+    ASSERT_GE(malorIdx, 0);
+    ASSERT_GE(cannonIdx, 0);
+    ASSERT_GE(unforgivenIdx, 0);
+    ASSERT_GE(hearthIdx, 0);
     ASSERT_GE(galfordIdx, 0);
     ASSERT_GE(dathrohanIdx, 0) << "Dathrohan (Balnazzar) objective missing";
     ASSERT_GE(barthIdx, 0);
@@ -260,22 +322,45 @@ TEST(BossRosterRegistryTest, StratholmeBarthilasReorderedBeforeZiggurats)
     ASSERT_GE(slaughterIdx, 0) << "slaughterhouse objective missing";
     ASSERT_GE(baronIdx, 0);
 
-    // Galford -> Dathrohan/Balnazzar -> Barthilas -> ziggurats -> slaughter -> Baron.
+    // Timmy leads: he comes before The Unforgiven and Hearthsinger (issue #5).
+    EXPECT_LT(timmyIdx, unforgivenIdx) << "Timmy must precede The Unforgiven";
+    EXPECT_LT(timmyIdx, hearthIdx) << "Timmy must precede Hearthsinger";
+
+    // Malor the Zealous clears before Cannon Master Willey (issue #5 follow-up).
+    EXPECT_LT(timmyIdx, malorIdx) << "Timmy still leads the live side";
+    EXPECT_LT(malorIdx, cannonIdx) << "Malor must precede the Cannon Master";
+    EXPECT_LT(cannonIdx, galfordIdx) << "Cannon Master before Galford";
+
+    // Live side (Timmy -> ... -> Galford -> Dathrohan/Balnazzar) before the two
+    // relocated bosses, which in turn precede the dead side.
     EXPECT_LT(galfordIdx, dathrohanIdx) << "Dathrohan follows Galford on the live side";
-    EXPECT_LT(dathrohanIdx, barthIdx) << "live side (Balnazzar) before the dead side";
+    EXPECT_LT(dathrohanIdx, unforgivenIdx) << "live side before The Unforgiven";
+    EXPECT_LT(unforgivenIdx, hearthIdx) << "Unforgiven before Hearthsinger";
+    EXPECT_LT(hearthIdx, barthIdx) << "relocated bosses before the dead side";
     EXPECT_LT(barthIdx, baronessIdx) << "Barthilas must precede the ziggurats";
     EXPECT_LT(malekiIdx, slaughterIdx) << "ziggurats before the slaughterhouse";
     EXPECT_LT(slaughterIdx, baronIdx) << "slaughterhouse before Baron";
 
-    // The Dathrohan objective slots at bit 6 (after Galford 5) and is an Objective
-    // (no real kill-bit — completion is its event, not the mask).
+    // The contiguous 1..13 order keys.
+    EXPECT_EQ(BossOrderKey(out[timmyIdx]), 1u);
+    EXPECT_EQ(BossOrderKey(out[malorIdx]), 2u);
+    EXPECT_EQ(BossOrderKey(out[cannonIdx]), 3u);
+    EXPECT_EQ(BossOrderKey(out[galfordIdx]), 4u);
     EXPECT_EQ(out[dathrohanIdx].kind, DungeonAnchorKind::Objective);
-    EXPECT_EQ(BossOrderKey(out[dathrohanIdx]), 6u);
+    EXPECT_EQ(BossOrderKey(out[dathrohanIdx]), 5u);
+    EXPECT_EQ(BossOrderKey(out[unforgivenIdx]), 6u);
+    EXPECT_EQ(BossOrderKey(out[hearthIdx]), 7u);
+    EXPECT_EQ(BossOrderKey(out[slaughterIdx]), 12u);
+    EXPECT_EQ(BossOrderKey(out[baronIdx]), 13u);
 
-    // Reordering must NOT disturb Barthilas's real kill-bit: completion still keys on 10.
+    // Reordering must NOT disturb real kill-bits: completion still keys on the DBC
+    // encounterIndex, only the order key moves.
     EXPECT_EQ(out[barthIdx].encounterIndex, 10u);
-    EXPECT_EQ(out[barthIdx].orderOverride, 6);
-    EXPECT_EQ(BossOrderKey(out[barthIdx]), 6u);
+    EXPECT_EQ(out[barthIdx].orderOverride, 8);
+    EXPECT_EQ(BossOrderKey(out[barthIdx]), 8u);
+    EXPECT_EQ(out[unforgivenIdx].encounterIndex, 0u) << "Unforgiven keeps kill-bit 0";
+    EXPECT_EQ(out[hearthIdx].encounterIndex, 1u) << "Hearthsinger keeps kill-bit 1";
+    EXPECT_EQ(out[baronIdx].encounterIndex, 12u) << "Baron keeps kill-bit 12";
 }
 
 // Blackrock Depths: the Ring of Law objective (its own DungeonEncounter bit 3,
@@ -287,7 +372,7 @@ TEST(BossRosterRegistryTest, RingOfLawObjectiveSortsBetweenGrebmarAndLoregrain)
         Boss(9319, 2, "Houndmaster Grebmar", 230),
         Boss(9024, 4, "Pyromancer Loregrain", 230),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(230, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(230, DUNGEON_DIFFICULTY_NORMAL, base);
 
     int grebmarIdx = -1, ringIdx = -1, loregrainIdx = -1;
     for (int i = 0; i < (int)out.size(); ++i)
@@ -317,7 +402,7 @@ TEST(BossRosterRegistryTest, IronCladDoorSortsBetweenGilnidAndMrSmite)
         Boss(1763, 2, "Gilnid", 36),
         Boss(646, 3, "Mr. Smite", 36),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(36, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(36, DUNGEON_DIFFICULTY_NORMAL, base);
 
     int gilnidIdx = -1, doorIdx = -1, smiteIdx = -1;
     for (int i = 0; i < (int)out.size(); ++i)
@@ -349,7 +434,7 @@ TEST(BossRosterRegistryTest, SlavePensDropSortsBetweenMennuAndRokmar)
         Boss(17991, 1, "Rokmar the Crackler", 547),
         Boss(17942, 2, "Quagmirran", 547),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(547, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(547, DUNGEON_DIFFICULTY_NORMAL, base);
 
     int mennuIdx = -1, dropIdx = -1, rokmarIdx = -1;
     for (int i = 0; i < (int)out.size(); ++i)
@@ -384,7 +469,7 @@ TEST(BossRosterRegistryTest, UnderbogDropSortsBetweenGhazanAndSwamplord)
         Boss(17826, 2, "Swamplord Musel'ek", 546),
         Boss(17882, 3, "The Black Stalker", 546),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(546, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(546, DUNGEON_DIFFICULTY_NORMAL, base);
 
     int ghazanIdx = -1, dropIdx = -1, swamplordIdx = -1;
     for (int i = 0; i < (int)out.size(); ++i)
@@ -420,7 +505,7 @@ TEST(BossRosterRegistryTest, DireMaulEastIronbarkSortsBeforeAlzzin)
         Boss(14327, 2, "Lethtendris", 429),
         Boss(11492, 3, "Alzzin the Wildshaper", 429),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(429, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(429, DUNGEON_DIFFICULTY_NORMAL, base);
 
     // NOTE: Dire Maul shares ONE map-429 patch across wings, so Apply() also
     // appends the West pylon objectives (eventId 4-8). Identify Ironbark by his
@@ -464,7 +549,7 @@ TEST(BossRosterRegistryTest, DireMaulWestPylonsAndOrder)
         Boss(11488, 3, "Illyanna Ravenoak", 429),
         Boss(11489, 4, "Tendris Warpwood", 429),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(429, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(429, DUNGEON_DIFFICULTY_NORMAL, base);
 
     // All five West bosses survive with their real kill-bits untouched.
     ASSERT_NE(Find(out, 11489), nullptr);
@@ -583,7 +668,7 @@ TEST(BossRosterRegistryTest, SunkenTempleReordersPhaseGatedBosses)
         Boss(5722, 6, "Hazzas", 109),
         Boss(5709, 8, "Shade of Eranikus", 109),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(109, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(109, DUNGEON_DIFFICULTY_NORMAL, base);
 
     // The three phase/puzzle-gated bosses are gone as combat bosses.
     EXPECT_EQ(Find(out, 8580), nullptr);
@@ -643,7 +728,7 @@ TEST(BossRosterRegistryTest, UnpatchedMapReturnsBaseUnchanged)
         Boss(1001, 0, "A"),
         Boss(1002, 1, "B"),
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(34, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(34, DUNGEON_DIFFICULTY_NORMAL, base);
     ASSERT_EQ(out.size(), 2u);
     EXPECT_EQ(out[0].entry, 1001u);
     EXPECT_EQ(out[1].entry, 1002u);
@@ -662,7 +747,7 @@ TEST(BossRosterRegistryTest, SmCathedralSwapsWhitemaneForMograine)
         Boss(3977, 5, "High Inquisitor Whitemane", 189),
     };
 
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(189, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(189, DUNGEON_DIFFICULTY_NORMAL, base);
 
     // Whitemane removed.
     EXPECT_EQ(Find(out, 3977), nullptr);
@@ -715,7 +800,7 @@ TEST(BossRosterRegistryTest, ScholomanceMergesMardukAndVectus)
         Boss(10433, 4, "Marduk Blackpool", 289),
     };
 
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(289, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(289, DUNGEON_DIFFICULTY_NORMAL, base);
 
     // Both originals collapse: Marduk is gone entirely and Vectus's entry is
     // re-added as the single merged anchor.
@@ -750,7 +835,7 @@ TEST(BossRosterRegistryTest, ResultStaysClearOrdered)
         Boss(3977, 5, "High Inquisitor Whitemane", 189),
     };
 
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(189, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(189, DUNGEON_DIFFICULTY_NORMAL, base);
 
     // The result is sorted by clear ORDER key (orderOverride when set, else
     // encounterIndex), NOT by raw encounterIndex — Mograine's orderOverride 3
@@ -770,7 +855,7 @@ TEST(BossRosterRegistryTest, InheritResolvesBeforeRemoval)
     std::vector<DungeonBossInfo> base = {
         Boss(3977, 9, "High Inquisitor Whitemane", 189),  // non-default idx
     };
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(189, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(189, DUNGEON_DIFFICULTY_NORMAL, base);
 
     DungeonBossInfo const* mograine = Find(out, 3976);
     ASSERT_NE(mograine, nullptr);
@@ -797,7 +882,7 @@ TEST(BossRosterRegistryTest, WailingCavernsEscortObjectiveSortsBeforeMutanus)
         Boss(5775, 6, "Verdan the Everliving", 43),
     };
 
-    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(43, base);
+    std::vector<DungeonBossInfo> out = BossRosterRegistry::Apply(43, DUNGEON_DIFFICULTY_NORMAL, base);
 
     DungeonBossInfo const* escort = nullptr;
     DungeonBossInfo const* drop = nullptr;
@@ -842,4 +927,166 @@ TEST(BossRosterRegistryTest, WailingCavernsEscortObjectiveSortsBeforeMutanus)
     EXPECT_LT(verdanIdx, dropIdx);
     EXPECT_LT(dropIdx, escortIdx);
     EXPECT_LT(escortIdx, mutanusIdx);
+}
+
+// Sethekk Halls (556): the forced-Anzu objective and its room pre-clear.
+//
+// REGRESSION GUARD for a live heroic failure: the tank walked to the Anzu summon
+// statue, poked the summon into a completely untouched room, and the freshly
+// summoned Anzu (SetInCombatWithZone) then chased the party the length of the
+// hall and on into Ikiss's chamber, so they fought Anzu, Ikiss and the uncleared
+// NE/NW packs together.
+//
+// The cause was the anchor's arriveRadius, not the sweep volume. DcRel::
+// AtObjective (30) outranks DcRel::BlockingTrash (25), so crossing the arrive
+// radius hands the tick to the objective action for good. At 55yd that happened
+// a whole room-length from the statue: the ordinary corridor trash-clear was
+// suppressed for the entire approach, and the ClearRadius gate was then judged
+// (and the summon poked) from ~80yd out, where the volume's STRICT per-candidate
+// reachability probe cannot confirm a route to anything and the gate answers
+// "clear" over a room full of live trash.
+//
+// Both halves are pinned here:
+//   * arriveRadius must stay SMALL — the walk in belongs to the corridor clear
+//     and the pull pipeline, and the event may only take over once the tank is
+//     actually at the statue. It must still exceed step 0's MoveTo radius so that
+//     step completes on arrival and IsPersistentAnchoredEventActive latches the
+//     trigger on, which is what frees the sweep to range the full clear radius.
+//   * the ClearRadius volume must cover the WHOLE room — see the companion test
+//     SethekkAnzuSweepSpansTheWholeAnteChamber, which pins it against the actual
+//     map-556 spawn coordinates rather than against a radius number.
+TEST(BossRosterRegistryTest, SethekkAnzuObjectiveHandsOverOnlyAtTheStatue)
+{
+    std::vector<DungeonBossInfo> base = {
+        Boss(18472, 0, "Darkweaver Syth", 556),
+        Boss(18473, 2, "Talon King Ikiss", 556),
+    };
+    std::vector<DungeonBossInfo> out =
+        BossRosterRegistry::Apply(556, DUNGEON_DIFFICULTY_HEROIC, base);
+
+    DungeonBossInfo const* anzu = Find(out, BossRosterRegistry::ObjectiveEntry(1));
+    ASSERT_NE(anzu, nullptr) << "heroic Sethekk must carry the Anzu objective anchor";
+    EXPECT_EQ(anzu->kind, DungeonAnchorKind::Objective);
+    EXPECT_EQ(anzu->eventId, 1u);
+
+    DungeonEvent const* ev = DungeonEventRegistry::Find(556, anzu->eventId);
+    ASSERT_NE(ev, nullptr);
+
+    float moveRadius = -1.0f;
+    float clearRadius = -1.0f;
+    for (EventStep const& s : ev->steps)
+    {
+        if (s.kind == EventStepKind::MoveTo && moveRadius < 0.0f)
+            moveRadius = s.radius;
+        if (s.kind == EventStepKind::ClearRadius)
+            clearRadius = s.radius;
+    }
+    ASSERT_GT(moveRadius, 0.0f) << "step 0 must park the tank on the anchor";
+    ASSERT_GT(clearRadius, 0.0f) << "the event must carry a ClearRadius sweep";
+
+    EXPECT_LE(anzu->arriveRadius, 15.0f)
+        << "arriveRadius too large -> the objective seizes the tick a room-length "
+           "out, suppressing the corridor trash-clear and letting the pre-clear be "
+           "judged (and the summon poked) from outside the room";
+    EXPECT_GT(anzu->arriveRadius, moveRadius)
+        << "arriveRadius must exceed the MoveTo radius so step 0 completes on "
+           "arrival and the persistent at-objective latch engages";
+
+    EXPECT_GT(clearRadius, 0.0f) << "the event must carry a ClearRadius sweep";
+}
+
+// Sethekk Halls (556): the Anzu pre-clear must sweep the WHOLE ante-chamber.
+//
+// REGRESSION GUARD for heroic run tr-20260726-112544-3 (tank Zeeron). By then the
+// vantage-point half of the earlier fix was working — the gate certified from
+// botDistToCentre=0.0, and everything inside the old 60yd volume really was dead
+// — but the summon still fired into a room with five elites standing in it. The
+// old geometry note called them "the Ikiss-corridor packs at 73-87yd" and
+// excluded them on purpose. They are not in Ikiss's corridor: Ikiss stands at
+// (44.7,287), a further 45-60yd on with nothing in between. They are the last
+// pack of THIS room, on the same flat floor, in a hall with no doors in it — and
+// the pull pipeline never reaches them either, because the tank stops at the
+// statue. So nothing cleared them before the poke; the party met them after Anzu
+// died (run ...-4 shows the same as a post-Anzu pull of entry 21904, 5 observed).
+//
+// The fix re-centres the sweep on the ROOM instead of the statue, which sits 53yd
+// from the room's south end and 87yd from its north end. This test pins the
+// INTENT against the real map-556 spawn coordinates rather than a radius number:
+// both ends of the room are inside the volume, and the two things that are NOT
+// this room's problem — the Syth-approach pack behind the party and Ikiss ahead
+// of it — stay outside.
+TEST(BossRosterRegistryTest, SethekkAnzuSweepSpansTheWholeAnteChamber)
+{
+    DungeonEvent const* ev = DungeonEventRegistry::Find(556, 1);
+    ASSERT_NE(ev, nullptr);
+
+    EventStep const* clear = nullptr;
+    for (EventStep const& s : ev->steps)
+        if (s.kind == EventStepKind::ClearRadius)
+            clear = &s;
+    ASSERT_NE(clear, nullptr) << "the Anzu event must carry a ClearRadius sweep";
+
+    auto covers = [&](float x, float y)
+    {
+        float const dx = x - clear->x;
+        float const dy = y - clear->y;
+        return std::sqrt(dx * dx + dy * dy) <= clear->radius;
+    };
+
+    // Both ends of the ante-chamber. South: the doorway trio (Sethekk Ravenguard
+    // 18322 guid 138666). North: the landing pack at the mouth of Ikiss's chamber
+    // (Sethekk Prophet 18325 guid 138688 is its far member, and the Avian Warhawk
+    // 21904 guid 138757 at its near end PATROLS).
+    EXPECT_TRUE(covers(-141.7f, 283.0f))
+        << "sweep must reach the south-doorway trio (Ravenguards + Cobalt Serpent)";
+    EXPECT_TRUE(covers(-1.2f, 289.9f))
+        << "sweep must reach the north-landing pack — this is the pack that was "
+           "left standing when the summon fired; it is part of the room, not of "
+           "the walk on to Ikiss";
+    EXPECT_TRUE(covers(-14.9f, 293.1f))
+        << "sweep must reach the north landing's patrolling Avian Warhawk";
+
+    // ...and no further. The Time-Lost Scryer (18319 guid 138648) is on the Syth
+    // approach BEHIND the party, dead on the way in; Talon King Ikiss is the next
+    // encounter and belongs to boss-nav, not to a trash sweep.
+    EXPECT_FALSE(covers(-171.1f, 282.3f))
+        << "sweep must not reach back down the Syth approach";
+    EXPECT_FALSE(covers(44.7f, 287.0f))
+        << "sweep must stop well short of Talon King Ikiss";
+
+    // Margin for the two patrollers at the volume's edges: the room's far corners
+    // sit ~70yd out, so a radius that only just reaches them would drop a mob that
+    // happened to be mid-patrol at judging time.
+    EXPECT_GE(clear->radius, 78.0f) << "no patrol margin on the room's far ends";
+
+    // A sweep that must walk the hall and fight what it finds cannot live on the
+    // 30s EventStepTimeout default: a timed-out step is Failed, and this event is
+    // Optional, so Failed skips the rest of the event — dropping the summon on
+    // exactly the runs where the pre-clear was needed.
+    EXPECT_GE(clear->timeoutMs, 120000u)
+        << "ClearRadius needs an explicit long timeout, or an uncleared room "
+           "silently skips the Anzu summon";
+
+    // The sweep leaves the tank at the room's centre; Anzu lands at the statue.
+    // A MoveTo must gather the party back before the summon step pokes.
+    size_t clearIdx = ev->steps.size();
+    size_t settleIdx = ev->steps.size();
+    size_t customIdx = ev->steps.size();
+    for (size_t i = 0; i < ev->steps.size(); ++i)
+    {
+        if (ev->steps[i].kind == EventStepKind::ClearRadius)
+            clearIdx = i;
+        else if (ev->steps[i].kind == EventStepKind::MoveTo && clearIdx < i &&
+                 settleIdx == ev->steps.size())
+            settleIdx = i;
+        else if (ev->steps[i].kind == EventStepKind::Custom &&
+                 customIdx == ev->steps.size())
+            customIdx = i;
+    }
+    ASSERT_LT(settleIdx, ev->steps.size())
+        << "no MoveTo after the sweep — the party would sit through the ~40s "
+           "theatrics spread down the hall wherever the last straggler died";
+    EXPECT_LT(settleIdx, customIdx) << "the re-settle must precede the summon poke";
+    EXPECT_NEAR(ev->steps[settleIdx].x, -88.0f, 1.0f);
+    EXPECT_NEAR(ev->steps[settleIdx].y, 288.0f, 1.0f);
 }

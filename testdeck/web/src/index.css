@@ -1,0 +1,103 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+ * DC Test Deck palette — black surfaces with one deep-purple accent.
+ *
+ * Two custom scales replace Tailwind's stock neutrals/accent:
+ *   ink-*   every surface, border and body-copy tone
+ *   iris-*  the single interaction accent (nav, focus, primary buttons, links)
+ *
+ * ink is near-neutral, carrying only a couple of points of violet in the darks.
+ * That is deliberate: a truly neutral grey next to a saturated purple reads as
+ * two unrelated palettes, while a blue-leaning grey makes the page look navy
+ * rather than black. The whisper is enough to relate them and not enough to
+ * see as a colour.
+ *
+ * iris is deepest where it FILLS (600 is the primary button, 700 the darkest
+ * usable ground) and stays light where it is TEXT (300/400 sit on black and
+ * still have to be read), so deepening the accent never costs legibility.
+ *
+ * The stock scales are still used, but only where they carry MEANING, so a
+ * colour never has to be read twice:
+ *   emerald  success            red      wipe / failure
+ *   amber    warning, paused    fuchsia  heroic difficulty
+ *   sky      mana
+ * ------------------------------------------------------------------------- */
+
+@theme {
+  --color-ink-50: #f7f6f9;
+  --color-ink-100: #eceaf1;
+  --color-ink-200: #d5d2dd;
+  --color-ink-300: #b3afbe;
+  --color-ink-400: #9793a5;
+  --color-ink-500: #7b7887;
+  --color-ink-600: #56535f;
+  --color-ink-700: #37343f;
+  --color-ink-800: #242229;
+  --color-ink-900: #141318;
+  --color-ink-950: #0a090d;
+
+  --color-iris-50: #f6f2fd;
+  --color-iris-100: #ece2fb;
+  --color-iris-200: #d9c6f6;
+  --color-iris-300: #c1a5f0;
+  --color-iris-400: #a179e6;
+  --color-iris-500: #7f4fd4;
+  --color-iris-600: #5e2eb8;
+  --color-iris-700: #4a2192;
+  --color-iris-800: #37186e;
+  --color-iris-900: #26104e;
+  --color-iris-950: #16092e;
+}
+
+html {
+  color-scheme: dark;
+}
+
+/* The page is black. The two pools are purple only — no second hue — and dim
+ * enough that they read as the screen not being perfectly flat rather than as
+ * a coloured background: at their brightest they land around #100a1a, one step
+ * off the black they sit on. The app shell and the login card paint no
+ * background of their own, so this is the whole page. */
+body {
+  background-color: #050408;
+  background-image:
+    radial-gradient(1100px 620px at 12% -12%, #4a1f8f1f, transparent 62%),
+    radial-gradient(900px 520px at 96% 2%, #6b2ea81a, transparent 58%);
+  background-attachment: fixed;
+}
+
+/* Thin, quiet scrollbars for the terminal-ish panes. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-ink-700) transparent;
+}
+
+/* A native <select> paints its own light-grey lozenge and arrow in most
+ * engines, which is exactly one control out of step with every other box on a
+ * dark form. Strip the chrome and draw our own chevron. */
+select {
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 4.5 6 8.5 10 4.5' fill='none' stroke='%237b7887' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 0.7rem center;
+  background-size: 0.7rem;
+}
+
+/* The dropdown list itself is OS-drawn; this is as far as the page reaches. */
+select option {
+  background-color: var(--color-ink-900);
+  color: var(--color-ink-100);
+}
+
+::selection {
+  background: var(--color-iris-700);
+  color: var(--color-iris-50);
+}
+
+/* Keyboard focus is the accent everywhere. Inputs additionally light their own
+ * border (focus:border-iris-*), which the ring sits just outside of. */
+:focus-visible {
+  outline: 2px solid var(--color-iris-400);
+  outline-offset: 2px;
+}

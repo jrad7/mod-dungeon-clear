@@ -4,6 +4,7 @@
  */
 
 #include "DungeonClearRoomTrashValue.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
 #include <map>
 #include <optional>
@@ -23,6 +24,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcStatusPublisher.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 GuidVector DungeonClearRoomTrashValue::Calculate()
 {
@@ -38,7 +40,7 @@ GuidVector DungeonClearRoomTrashValue::Calculate()
         return out;
 
     // Only meaningful during an active, unpaused run.
-    if (!AI_VALUE(bool, "dungeon clear enabled") || AI_VALUE(bool, "dungeon clear paused"))
+    if (!DcRun::Of(context).enabled || DcRun::Of(context).paused)
     {
         trackedBoss = 0;
         gaveUp = false;
@@ -46,7 +48,7 @@ GuidVector DungeonClearRoomTrashValue::Calculate()
         return out;
     }
 
-    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, "next dungeon boss");
+    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
     if (!next.has_value())
     {
         trackedBoss = 0;
@@ -127,8 +129,20 @@ GuidVector DungeonClearRoomTrashValue::Calculate()
     // but outside the 27yd exclusion, locked the room clear.) One source keeps any
     // pack the skirt can't approach "coming with the boss" — cleared by the boss
     // pull, not chased into the aggro range.
-    float const bossSafe =
-        DcEngageGeometry::RoomAggroSphereRadius(bot, liveBoss);
+    //
+    // EXCEPTION: a room with an explicit pullOutRadius (Sepethrea) deliberately
+    // SHRINKS this exclusion below the skirt/standoff sphere so a pack parked on the
+    // boss's aggro edge is KEPT as clearable room trash instead of coming with the
+    // boss. That re-creates the dead band described above for a straight melee walk-
+    // in — which is why a non-zero pullOutRadius is COUPLED with forced advanced pull
+    // (DcTargeting::RoomClearForcesAdvanced): the tank never walks the kept pack down
+    // to melee inside the sphere; it forms up outside the pack's own aggro and drags
+    // it OUT to camp, so the skirt's no-go zone is never entered. See
+    // RoomAggroBoss::pullOutRadius. When unset (every other row) the exclusion stays
+    // identical to the skirt's avoid ring and the tank's standoff.
+    float const bossSafe = room->pullOutRadius > 0.0f
+        ? room->pullOutRadius
+        : DcEngageGeometry::RoomAggroSphereRadius(bot, liveBoss);
 
     // Per-reason exclusion tallies — logged below when the kept count changes so
     // a premature "room clear" (set empties while trash is alive, opening the boss
@@ -144,7 +158,7 @@ GuidVector DungeonClearRoomTrashValue::Calculate()
     // (widen radius) vs "threat is neutral-but-near" (explicit member whitelist).
     std::map<uint32, uint32> diagHostileNear, diagNeutralNear;
 
-    GuidVector const& candidates = AI_VALUE(GuidVector, "dungeon clear far targets");
+    GuidVector const& candidates = AI_VALUE(GuidVector, DcKey::FarTargets);
     nCand = static_cast<uint32>(candidates.size());
     for (ObjectGuid const guid : candidates)
     {

@@ -7,6 +7,7 @@
 #define _PLAYERBOT_DUNGEONCLEARPULLMODECURRENTVALUE_H
 
 #include "Value.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
 
@@ -38,7 +39,7 @@ class DungeonClearPullModeCurrentValue : public CalculatedValue<bool>
 {
 public:
     DungeonClearPullModeCurrentValue(PlayerbotAI* botAI)
-        : CalculatedValue<bool>(botAI, "dungeon clear pull mode current", 1)
+        : CalculatedValue<bool>(botAI, DcKey::PullModeCurrent, 1)
     {
     }
 

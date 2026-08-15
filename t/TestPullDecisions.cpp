@@ -186,3 +186,71 @@ TEST(DcPullDecision, AdvancedApproachingNotContendedCommits)
     o.patrolContended = false;
     EXPECT_EQ(DecidePull(o), PullVerdict::Advanced);
 }
+
+// ---------------------------------------------------------------------------
+// DcPullContext::SafetyRelease — the camp-safety valve's per-phase policy.
+// The valve wants "let them fight", not "abandon the maneuver": an in-flight
+// drag is kept (aborting it fights the pack wherever the party happens to be
+// standing — the over-pull the drag exists to prevent); only a pull still
+// walking OUT to its pack aborts as before.
+// ---------------------------------------------------------------------------
+
+#include "Ai/Dungeon/DungeonClear/DcPullContext.h"
+
+TEST(DcPullSafetyRelease, SafetyReleaseKeepsAReturningDrag)
+{
+    DcPullContext pull;
+    pull.Transition(DcPullPhase::Returning, 1000u);
+    EXPECT_FALSE(pull.SafetyRelease(2000u));
+    EXPECT_EQ(pull.phase, DcPullPhase::Returning);  // the drag continues
+    EXPECT_TRUE(pull.partyReleased);                // the party is freed
+}
+
+TEST(DcPullSafetyRelease, SafetyReleaseKeepsAFormingPull)
+{
+    DcPullContext pull;
+    pull.Transition(DcPullPhase::Forming, 1000u);
+    EXPECT_FALSE(pull.SafetyRelease(2000u));
+    EXPECT_EQ(pull.phase, DcPullPhase::Forming);
+    EXPECT_TRUE(pull.partyReleased);
+}
+
+TEST(DcPullSafetyRelease, SafetyReleaseAbortsAnAdvancingPull)
+{
+    DcPullContext pull;
+    pull.Transition(DcPullPhase::Advancing, 1000u);
+    EXPECT_TRUE(pull.SafetyRelease(2000u));
+    EXPECT_EQ(pull.phase, DcPullPhase::Engage);
+    // The flag survives the Engage transition so the reaper releases the party
+    // at once (a safety release never waits out the graceful Engage delay).
+    EXPECT_TRUE(pull.partyReleased);
+    EXPECT_EQ(pull.phaseSince, 2000u);
+}
+
+TEST(DcPullSafetyRelease, SafetyReleaseIsANoOpOutsideAManeuver)
+{
+    DcPullContext pull;
+    EXPECT_FALSE(pull.SafetyRelease(2000u));
+    EXPECT_EQ(pull.phase, DcPullPhase::Idle);
+    EXPECT_FALSE(pull.partyReleased);
+
+    pull.Transition(DcPullPhase::Engage, 1000u);
+    EXPECT_FALSE(pull.SafetyRelease(2000u));
+    EXPECT_EQ(pull.phase, DcPullPhase::Engage);
+    EXPECT_FALSE(pull.partyReleased);
+}
+
+TEST(DcPullSafetyRelease, NextManeuverClearsAStandingRelease)
+{
+    DcPullContext pull;
+    pull.Transition(DcPullPhase::Returning, 1000u);
+    pull.SafetyRelease(2000u);
+    EXPECT_TRUE(pull.partyReleased);
+    // The kept drag finishes: Returning -> Engage. The release must survive
+    // (immediate strip, no graceful delay for an already-released party).
+    pull.Transition(DcPullPhase::Engage, 3000u);
+    EXPECT_TRUE(pull.partyReleased);
+    // A NEW pull starting (Engage -> Forming) belongs to a fresh maneuver.
+    pull.Transition(DcPullPhase::Forming, 4000u);
+    EXPECT_FALSE(pull.partyReleased);
+}

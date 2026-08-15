@@ -6,11 +6,26 @@
 #ifndef _PLAYERBOT_DUNGEONEVENTREGISTRY_H
 #define _PLAYERBOT_DUNGEONEVENTREGISTRY_H
 
+#include <functional>
 #include <string>
 #include <vector>
 
 #include "Common.h"
 #include "SharedDefines.h"  // TeamId
+
+#include "Ai/Dungeon/DungeonClear/Data/DcDifficultyGate.h"
+
+class Player;
+class AiObjectContext;
+
+// A Conditional event's activation predicate: a pure-ish read-only test over the
+// live world, evaluated each tick. When it returns true (and the event is not yet
+// latched) the conditional-event trigger drives the event's steps. The predicate
+// lives next to the event that uses it (one file per dungeon under Data/Events/,
+// cross-dungeon shared predicates in SharedConditions.cpp) and is handed to the
+// builder directly by pointer — there is no global id space to keep collision-
+// free (a typo is now a compile error, not a silently-never-firing event).
+using EventCondition = std::function<bool(Player*, AiObjectContext*)>;
 
 // Declarative framework for scripted dungeon EVENTS the party must perform to
 // progress — pull a lever, click an altar, talk to an NPC and pick a gossip
@@ -106,6 +121,22 @@ enum class EventStepKind : uint8
                              // Done immediately if the leader is already on the landing,
                              // so a tick-gap restart never re-teleports. Anchored only
                              // (one-way — the bot can't path back up).
+    UseItemOnGO,             // USE a quest item ON a positioned GameObject: grant the
+                             // item (itemId) if the bags lack it, then USE it (the full
+                             // CastItemUseSpell path) AT the GO of goEntry nearest
+                             // (x,y,z), so the GO's SmartAI SMART_EVENT_SPELLHIT
+                             // fires. This is the "plant a bomb on a barrel" mechanic
+                             // (Old Hillsbrad's Durnholde barrels — item 25853, spell
+                             // 32744, GO 182589). The use-spell is OPEN_LOCK against
+                             // the GO's ITEM lock, so it only hits when cast FROM the
+                             // key item — the Deadmines-cannon gotcha; a bare or
+                             // triggered CastSpell never registers. Distinct from
+                             // UseGameObject (Use()s the GO — never delivers a
+                             // SPELLHIT) and UseItem (self-cast — no GO target). The
+                             // (x,y,z) anchor picks a SPECIFIC GO, so five same-entry
+                             // barrels are hit as five DISTINCT GOs. Done once the GO
+                             // leaves GO_READY (the landed plant Uses the goober — a
+                             // stable per-GO success latch, idempotent across restarts).
 };
 
 // One typed primitive. Fields are a shared bag — only those relevant to `kind`
@@ -163,7 +194,9 @@ struct EventStep
 
     uint32 durationMs{0};    // Wait: dwell length
     uint32 timeoutMs{0};     // 0 => EventStepTimeout config default; else per-step
-    uint32 hookId{0};        // Custom -> ObjectiveHookRegistry
+    uint32 hookId{0};        // Custom -> ObjectiveHookRegistry; on a garrison MoveTo,
+                             // the hook to re-run each tick WHILE it holds (see
+                             // EventBuilder::WhileHolding). 0 => none.
 
     // --- EscortCreature only ----------------------------------------------
     // The escortee (creatureEntry) is the NPC to protect; `radius` is the grid
@@ -202,6 +235,20 @@ struct EventStep
     // climbs, so a >= gate is safe to observe late. -1 => no instance-data gate.
     int32  instanceDataId{-1};
     uint32 instanceDataMin{0};
+
+    // ClearRadius only. When non-empty, the volume clears ONLY creatures whose
+    // entry is in this allow-list — both the RunStep completion gate and the
+    // EngageDirect the driving action issues. Empty (the default) keeps the
+    // plain position-based behaviour: everything hostile in the volume.
+    //
+    // For a set-piece fought inside ambient wildlife this is the difference
+    // between the encounter and a safari. Black Morass is the case that forced
+    // it: the wave volumes sit in open swamp (the arena catch-all is r=160),
+    // and unfiltered they sent the party chasing crocolisks and tarantulas
+    // across the map while the rift's infinites walked unopposed into Medivh.
+    // Ambient fauna is still fought when it aggros the party — that is the
+    // normal combat engine's job, not the clear's.
+    std::vector<uint32> entryFilter;
 };
 
 // How an event enters the clear. Milestone 1 only uses Anchored; Conditional is
@@ -209,7 +256,7 @@ struct EventStep
 enum class EventActivation : uint8
 {
     Anchored,     // referenced by a boss-list objective anchor (orderIndex)
-    Conditional,  // fired by a predicate (conditionId) each tick
+    Conditional,  // fired by a predicate (condition) each tick
 };
 
 struct DungeonEvent
@@ -220,7 +267,14 @@ struct DungeonEvent
 
     EventActivation activation{EventActivation::Anchored};
     uint32 orderIndex{0};    // Anchored: the objective's encounter slot (doc only)
-    uint32 conditionId{0};   // Conditional: predicate id (milestone 2)
+    EventCondition condition{};  // Conditional: the per-tick activation predicate
+
+    // Difficulty gate. A HeroicOnly event never fires (and never surfaces in the
+    // panel) on a normal run, and vice versa. For an ANCHORED event the primary
+    // gate is the roster anchor that references it (gate the BossRosterPatch);
+    // this field additionally hard-stops Drive as a belt-and-suspenders, and is
+    // what the conditional-event paths filter on directly.
+    DcDifficultyGate gate{DcDifficultyGate::Any};
 
     std::vector<EventStep> steps;
 
@@ -239,6 +293,69 @@ struct DungeonEvent
     // the boss spawns — the gong's own selectable flag gates each ring and the
     // boss going live ends the loop, so a fixed latch would stop it after ring 1.
     bool repeatable{false};
+
+    // Conditional events only. A conditional event is normally driven ONLY out of
+    // combat (DungeonClearEventDueTrigger stands down on bot->IsInCombat(), so the
+    // stock combat engine owns every fight uncontested). That is right for the
+    // usual shape — a lever, a gossip, a gate — where the event's work happens
+    // between pulls.
+    //
+    // It is WRONG for a continuous WAVE encounter, where the party is in combat
+    // essentially from the first pull to the last and the event IS the encounter.
+    // There the non-combat-only driver runs only in the shrinking gaps between
+    // waves, and stops running altogether the moment the party falls behind and
+    // combat stops dropping — exactly when the encounter most needs steering.
+    // Black Morass is the case that forced this flag: with two rifts open the
+    // party never left combat, so nothing ever walked it to a portal to kill the
+    // rift keeper, so the rifts never closed — a spiral with no floor. (Sunken
+    // Temple's Avatar of Hakkar hit the same wall and was fixed the same way, by
+    // hand, with a second copy of its handlers in DungeonClearCombatStrategy; this
+    // is that fix generalised onto the events framework.)
+    //
+    // When set, the event is ALSO driven by the combat-engine copy of the
+    // conditional-event rung (DungeonClearEventDueCombatTrigger ->
+    // DcRunEventCombatAction, DcRel::EventDueCombat), which sits above the stock
+    // combat movers so the driver can actually reposition the tank mid-fight.
+    // Reserve it for encounters that genuinely need steering under fire: it takes
+    // ticks away from the stock combat engine, which is the right owner everywhere
+    // else.
+    bool drivesInCombat{false};
+
+    // This event's STEPS are the sole driver: they issue their own movement, and
+    // they decide per tick whether they need the tick at all.
+    //
+    // Two consequences, both of which a continuous driver event needs:
+    //
+    //  (a) the driving action does NOT hold position for it (below); and
+    //  (b) when a step reports Done — "nothing to steer this tick" — the action
+    //      YIELDS the tick instead of claiming it. Engine::DoNextAction runs
+    //      exactly ONE action per tick (it breaks out of its loop on the first
+    //      Execute returning true), so a driver registered above the stock combat
+    //      movers that returns true every tick starves the combat engine outright:
+    //      the bot never picks a target, never swings, never casts, never builds
+    //      threat. Black Morass wiped parties that way — the tank drove to the
+    //      portal, the keeper engaged it, and the tank stood there taking hits
+    //      with no rotation while the DPS pulled aggro and died. The step still
+    //      RUNS every tick (the trigger is unchanged), so its side effects stay
+    //      responsive; it just stops claiming ticks it does not need.
+    //
+    // DcRunEventAction normally calls DcMovement::ResolveEscortConflict before
+    // every Drive, to park the tank while a step does its work — right for a
+    // lever, a gossip, a wait. But ResolveEscortConflict CANCELS any escort glide
+    // in flight, and it runs BEFORE the step does, so a Custom hook that delivers
+    // the tank across the map with its own long-range spline has that spline
+    // killed on the very next tick, re-issues it, has it killed again... and the
+    // bot creeps roughly one tick's worth of movement per cycle while logging a
+    // perfectly healthy "spline issued" each time.
+    //
+    // Black Morass is where this was found. Its rift camp was moved onto
+    // LongRangePathfinder precisely because the portals are 80-102yd out and a
+    // bare MovePoint silently truncates — and it STILL never arrived: 151 camp
+    // attempts in a 10-run batch, none within 20yd of the rift, 111 logging
+    // moving=false. The route was fine; it was being cancelled from under the
+    // hook. Set this only for an event whose steps genuinely own the tank's
+    // movement, or it will fight whatever else is trying to hold position.
+    bool stepsOwnMovement{false};
 
     // ANCHORED events only. A normal anchored event is driven only while the tank
     // sits at its objective anchor, and DungeonEventExecutor::Drive RESTARTS it
@@ -291,10 +408,19 @@ public:
     EventBuilder(uint32 mapId, uint32 id, std::string name);
 
     EventBuilder& Anchored(uint32 orderIndex);
-    EventBuilder& Conditional(uint32 conditionId);
+    EventBuilder& Conditional(EventCondition condition);
     EventBuilder& Optional();
     EventBuilder& Repeatable();
     EventBuilder& Persistent();
+    // Keep driving this conditional event while the party is IN COMBAT (see
+    // DungeonEvent::drivesInCombat). For continuous wave encounters only.
+    EventBuilder& DrivesInCombat();
+    // Do not hold position for this event's steps — they issue their own movement
+    // (see DungeonEvent::stepsOwnMovement).
+    EventBuilder& StepsOwnMovement();
+    // Difficulty gates (see DungeonEvent::gate). Default is both difficulties.
+    EventBuilder& HeroicOnly();
+    EventBuilder& NormalOnly();
     EventBuilder& PanelBeforeBoss(uint32 bossEntry);
     // Sort this standalone event just AFTER `bossEntry` in the panel, keeping it
     // as its own numbered row (unlike PanelBeforeBoss, which folds the event into
@@ -340,6 +466,23 @@ public:
     // bosses are already dead by the time the party drops combat).
     EventBuilder& MoveToHoldUntilInstanceData(float x, float y, float z, float radius,
                                               uint32 dataId, uint32 minValue);
+    // Run ObjectiveHookRegistry `hookId` every tick while the PRECEDING garrison
+    // step holds, in addition to its gate. The hook's result is ignored — the gate
+    // alone still ends the step. Chain it right after the step it arms:
+    //   .MoveToHoldUntilInstanceData(x, y, z, r, dataId, min).WhileHolding(hook)
+    //
+    // For a garrison whose gate can regress BEHIND THE PARTY'S BACK, where the
+    // usual "start it with a Custom step, then hold for the finish" pair silently
+    // stops being true. The Ring of Law is the case it exists for: npc_grimstone's
+    // own 30s "no summon has a victim" watchdog SetData(FAIL)s the arena, which
+    // despawns Grimstone and every wave and puts TYPE_RING_OF_LAW back to
+    // NOT_STARTED. Nothing then restarts it — the Custom step that fired the
+    // areatrigger latched Done minutes ago, and the test-run areatrigger relay is
+    // EDGE-triggered on a volume the party is already standing in — so the hold
+    // burns its whole timeout on an encounter that is no longer running. Re-running
+    // the start hook from inside the hold closes that: it is a no-op while the
+    // encounter is live and re-fires the real trigger once it isn't.
+    EventBuilder& WhileHolding(uint32 hookId);
     EventBuilder& UseGO(uint32 goEntry, float searchRadius = 0.0f,
                         float x = 0.0f, float y = 0.0f, float z = 0.0f);
     // Leader casts `spellId` on itself (triggered: no cost/cooldown/reagent/cast
@@ -373,17 +516,45 @@ public:
     // anchor placed at the centre so boss-nav travels the tank in first.
     EventBuilder& ClearRadius(float x, float y, float z, float radius,
                               float zBand = 20.0f);
+    // Restrict the PRECEDING ClearRadius to the given creature entries (see
+    // EventStep::entryFilter). Chain it right after the step it narrows:
+    //   .ClearRadius(x, y, z, r).OnlyEntries({ENTRY_A, ENTRY_B})
+    EventBuilder& OnlyEntries(std::vector<uint32> entries);
     EventBuilder& Wait(uint32 durationMs);
     EventBuilder& Custom(uint32 hookId);
     // Protect a moving escortee (see EventStepKind::EscortCreature). `escortee` is
-    // the NPC entry, `startGossipOption` the menu option that starts its scripted
-    // escort (re-run on self-heal), `doneEntry`/`doneBit` the final boss whose
-    // existence/kill completes the step. The geometry knobs carry sensible
-    // defaults; `searchRadius` is the live-escortee grid scan radius.
+    // the NPC entry, `startGossipOption` the menu option that starts (and, when the
+    // escortee re-offers a gossip mid-route, RESUMES) its scripted escort, and
+    // `doneEntry`/`doneBit` the final boss whose existence/kill completes the step.
+    //
+    // `doneDataId`/`doneDataMin` are an ALTERNATIVE completion gate for an escort
+    // whose end is not marked by a boss going live but by the map's monotonic
+    // progress counter reaching a value (Old Hillsbrad's whole Thrall escort — one
+    // step from freeing him through Epoch Hunter's death — completes when
+    // DATA_ESCORT_PROGRESS reaches FINISHED). -1 => unused (boss-entry gate only).
+    // The two gates are OR'd: either satisfies completion.
+    //
+    // The geometry knobs carry sensible defaults; `searchRadius` is the live-
+    // escortee grid scan radius (widen it for a mounted escort that outpaces the
+    // party so the escortee is never lost off-grid).
     EventBuilder& EscortCreature(uint32 escortee, int32 startGossipOption,
                                  uint32 doneEntry, int32 doneBit,
                                  float standoff = 5.0f, float threatRadius = 18.0f,
-                                 float threatZBand = 20.0f, float searchRadius = 80.0f);
+                                 float threatZBand = 20.0f, float searchRadius = 80.0f,
+                                 int32 doneDataId = -1, uint32 doneDataMin = 0);
+    // Use a quest item ON a positioned GameObject (see EventStepKind::UseItemOnGO):
+    // approach the `goEntry` GO nearest (x,y,z), then USE `itemId` on it via the
+    // full item-use cast path (granting the item first if the bags lack it;
+    // `spellId` is the item's use-spell, kept for validation and logging), so its
+    // SmartAI SPELLHIT fires (the Durnholde barrel-bomb). `radius` is the CAST
+    // REACH (0 => 3.5yd STRICT world distance — the landed OPEN_LOCK range-checks
+    // the GO's interact box, live-measured failing at 6yd; arrival additionally
+    // requires vmap LINE OF SIGHT so a barrel across a thin wall never reads as
+    // reachable). The approach INTO the house is driven tick-owning
+    // (DriveUseItemOnGO), which threads the doorway, detours to the anchor when
+    // the barrel is walled off, and force-walks the final un-meshed yards.
+    EventBuilder& UseItemOnGO(uint32 itemId, uint32 spellId, uint32 goEntry,
+                              float x, float y, float z, float radius = 0.0f);
     // Drop the party down a narrow vertical hole (see EventStepKind::DropInHole).
     // (overX,overY,overZ) is the over-hole nudge target the leader glides to (a
     // point whose column is open straight to the deep floor — NOT the lip, whose
@@ -413,6 +584,12 @@ private:
 class DungeonEventRegistry
 {
 public:
+    // The full event table, in registration order. Exposed as a seam for the
+    // registry-integrity gtests (t/TestEventRegistry.cpp) — cross-reference and
+    // persistence lint over the authored data. Not used by runtime callers, which
+    // key on Find/Conditional.
+    static std::vector<DungeonEvent> const& AllEvents();
+
     // The event with `id` on `mapId`, or nullptr if none is registered.
     static DungeonEvent const* Find(uint32 mapId, uint32 id);
 
@@ -420,9 +597,15 @@ public:
     static bool HasEvents(uint32 mapId);
 
     // Every Conditional-activation event registered for `mapId`, in table order.
-    // Empty for maps with only Anchored events. Used by the conditional-event
-    // trigger/action to find a due off-path event each tick (milestone 2).
+    // Empty for maps with only Anchored events. UNFILTERED by difficulty — an
+    // authoring/test seam like AllEvents. Runtime callers use the difficulty
+    // overload below so a heroic-only event never surfaces on a normal run.
     static std::vector<DungeonEvent const*> Conditional(uint32 mapId);
+
+    // The Conditional events whose difficulty gate matches `difficulty`. This is
+    // the runtime lookup — every live consumer (executor, panel, targeting) has
+    // the bot's map in hand and must pass its difficulty.
+    static std::vector<DungeonEvent const*> Conditional(uint32 mapId, Difficulty difficulty);
 
     // --- Room-aggro pre-clear (milestone 3) ------------------------------
 

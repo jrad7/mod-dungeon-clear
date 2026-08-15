@@ -36,15 +36,33 @@ struct DcNavPenaltyVolume
     float  costMult{1.0f};   // edge-cost multiplier inside the box (>= 1)
 };
 
+// Same contract as DcNavPenaltyVolume, but the XY footprint is a simple polygon
+// (convex or not) plus a Z band instead of an axis-aligned box — for a bad spot
+// whose shape is a room corner or curved edge that no single box can hug without
+// also covering walkable floor. Vertices are world-space, in order around the
+// ring; the first and last are implicitly joined. Up to 8 vertices; `vertCount`
+// says how many of vx/vy are live.
+struct DcNavPenaltyPolygon
+{
+    uint32 mapId{0};
+    float  minZ{0.0f}, maxZ{0.0f};
+    float  costMult{1.0f};
+    uint32 vertCount{0};
+    float  vx[8]{};
+    float  vy[8]{};
+};
+
 class DcNavPenaltyRegistry
 {
 public:
-    // True iff `mapId` has at least one penalty volume. Cheap early-out so
-    // getCost only does the per-edge box test on maps that actually need it.
+    // True iff `mapId` has at least one penalty volume or polygon. Cheap
+    // early-out so getCost only does the per-edge region test on maps that
+    // actually need it.
     static bool HasVolumes(uint32 mapId);
 
-    // The largest costMult of any volume on `mapId` that contains (x,y,z), or
-    // 1.0 when the point lies in no volume. Pure (no game state) — unit-testable.
+    // The largest costMult of any volume or polygon on `mapId` that contains
+    // (x,y,z), or 1.0 when the point lies in no region. Pure (no game state) —
+    // unit-testable.
     static float PenaltyAt(uint32 mapId, float x, float y, float z);
 };
 

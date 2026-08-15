@@ -6,6 +6,7 @@
 #ifndef _DC_STATUS_PUBLISHER_H
 #define _DC_STATUS_PUBLISHER_H
 
+#include <functional>
 #include <string>
 #include "Define.h"
 #include "ObjectGuid.h"
@@ -42,6 +43,13 @@ public:
 
     static void TickStatusPushes(uint32 diff);
 
+    // Optional server-side observer for changed STATUS payloads. Addon
+    // messages only reach real players in the bot's GROUP; the `.dc test`
+    // harness monitors a party it is not in, so the change-detector hands it
+    // each changed frame here as well. Injected as a callback (registered
+    // once at module startup) so this Util unit never includes TestRun code.
+    using StatusObserver = std::function<void(ObjectGuid, std::string const&)>;
+    static void SetStatusObserver(StatusObserver observer);
 };
 
 #endif  // _DC_STATUS_PUBLISHER_H

@@ -8,6 +8,7 @@
 
 #include "ObjectGuid.h"
 #include "Value.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 class PlayerbotAI;
 
@@ -32,7 +33,7 @@ class DungeonClearHealTargetValue : public CalculatedValue<ObjectGuid>
 {
 public:
     DungeonClearHealTargetValue(PlayerbotAI* botAI)
-        : CalculatedValue<ObjectGuid>(botAI, "dungeon clear heal target", 200)
+        : CalculatedValue<ObjectGuid>(botAI, DcKey::HealTarget, 200)
     {
     }
 

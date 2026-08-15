@@ -24,7 +24,6 @@
 #include <vector>
 #include "AttackersValue.h"
 #include "CellImpl.h"
-#include "Config.h"
 #include "Creature.h"
 #include "CreatureGroups.h"
 #include "GameObject.h"
@@ -56,6 +55,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLiveBossValue.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
 void DcLootPolicy::StripSkippedLoot(PlayerbotAI* botAI)
 {
@@ -64,12 +64,12 @@ void DcLootPolicy::StripSkippedLoot(PlayerbotAI* botAI)
 
     AiObjectContext* ctx = botAI->GetAiObjectContext();
     std::map<ObjectGuid, uint32>& skip =
-        ctx->GetValue<std::map<ObjectGuid, uint32>&>("dungeon clear loot skip")->Get();
+        ctx->GetValue<std::map<ObjectGuid, uint32>&>(DcKey::LootSkip)->Get();
     if (skip.empty())
         return;  // happy path: nothing was ever given up on.
 
     uint32 const now = getMSTime();
-    LootObjectStack* stack = ctx->GetValue<LootObjectStack*>("available loot")->Get();
+    LootObjectStack* stack = ctx->GetValue<LootObjectStack*>(DcKey::Stock::AvailableLoot)->Get();
 
     for (auto it = skip.begin(); it != skip.end();)
     {
@@ -93,9 +93,9 @@ void DcLootPolicy::StripSkippedLoot(PlayerbotAI* botAI)
     // can-loot reads "loot target", not the stack, so a bot parked within 3yd
     // of a skipped corpse would keep can-loot true (and keep yielding) unless we
     // also drop the committed target here.
-    LootObject const target = ctx->GetValue<LootObject>("loot target")->Get();
+    LootObject const target = ctx->GetValue<LootObject>(DcKey::Stock::LootTarget)->Get();
     if (!target.guid.IsEmpty() && skip.find(target.guid) != skip.end())
-        ctx->GetValue<LootObject>("loot target")->Set(LootObject());
+        ctx->GetValue<LootObject>(DcKey::Stock::LootTarget)->Set(LootObject());
 }
 void DcLootPolicy::GiveUpCurrentLoot(PlayerbotAI* botAI, uint32 ttlMs)
 {
@@ -106,15 +106,15 @@ void DcLootPolicy::GiveUpCurrentLoot(PlayerbotAI* botAI, uint32 ttlMs)
 
     // Prefer the target stock already committed to; otherwise the nearest loot
     // we'd pick next. Either is what kept the yield armed.
-    ObjectGuid guid = ctx->GetValue<LootObject>("loot target")->Get().guid;
+    ObjectGuid guid = ctx->GetValue<LootObject>(DcKey::Stock::LootTarget)->Get().guid;
     if (guid.IsEmpty())
-        if (LootObjectStack* stack = ctx->GetValue<LootObjectStack*>("available loot")->Get())
+        if (LootObjectStack* stack = ctx->GetValue<LootObjectStack*>(DcKey::Stock::AvailableLoot)->Get())
             guid = stack->GetLoot(sPlayerbotAIConfig.lootDistance).guid;
     if (guid.IsEmpty())
         return;  // nothing of our own to give up on (tank waiting on a follower)
 
     std::map<ObjectGuid, uint32>& skip =
-        ctx->GetValue<std::map<ObjectGuid, uint32>&>("dungeon clear loot skip")->Get();
+        ctx->GetValue<std::map<ObjectGuid, uint32>&>(DcKey::LootSkip)->Get();
     if (ttlMs == LOOT_SKIP_STICKY)
     {
         skip[guid] = LOOT_SKIP_STICKY;  // never expires (permanent skip reason)
@@ -134,18 +134,18 @@ bool DcLootPolicy::MaybeGiveUpCampedLoot(PlayerbotAI* botAI, uint32 campTimeoutM
         return false;
 
     AiObjectContext* ctx = botAI->GetAiObjectContext();
-    ObjectGuid& campGuid = ctx->GetValue<ObjectGuid>("dungeon clear loot camp guid")->RefGet();
+    ObjectGuid& campGuid = ctx->GetValue<ObjectGuid>(DcKey::LootCampGuid)->RefGet();
 
     // Only meaningful once the bot is standing in interaction range of a corpse
     // (can-loot true). While merely walking toward one (has-available-loot), the
     // broader loot-yield timeout — which budgets for the walk — applies instead.
-    if (!ctx->GetValue<bool>("can loot")->Get())
+    if (!ctx->GetValue<bool>(DcKey::Stock::CanLoot)->Get())
     {
         campGuid = ObjectGuid::Empty;  // not camping -> reset the clock
         return false;
     }
 
-    LootObject const target = ctx->GetValue<LootObject>("loot target")->Get();
+    LootObject const target = ctx->GetValue<LootObject>(DcKey::Stock::LootTarget)->Get();
     if (target.guid.IsEmpty())
     {
         campGuid = ObjectGuid::Empty;
@@ -158,7 +158,7 @@ bool DcLootPolicy::MaybeGiveUpCampedLoot(PlayerbotAI* botAI, uint32 campTimeoutM
     if (target.skillId != 0)
         return false;
 
-    uint32& campStart = ctx->GetValue<uint32>("dungeon clear loot camp start")->RefGet();
+    uint32& campStart = ctx->GetValue<uint32>(DcKey::LootCampStart)->RefGet();
     uint32 const now = getMSTime();
 
     if (campGuid != target.guid)
@@ -215,9 +215,9 @@ bool DcLootPolicy::MaybeSkipUnworthyLoot(PlayerbotAI* botAI)
     constexpr int kMaxDrain = 32;
     for (int i = 0; i < kMaxDrain; ++i)
     {
-        LootObject target = ctx->GetValue<LootObject>("loot target")->Get();
+        LootObject target = ctx->GetValue<LootObject>(DcKey::Stock::LootTarget)->Get();
         if (target.guid.IsEmpty())
-            if (LootObjectStack* stack = ctx->GetValue<LootObjectStack*>("available loot")->Get())
+            if (LootObjectStack* stack = ctx->GetValue<LootObjectStack*>(DcKey::Stock::AvailableLoot)->Get())
                 target = stack->GetLoot(sPlayerbotAIConfig.lootDistance);
         if (target.guid.IsEmpty())
             break;  // nothing left to judge
@@ -276,7 +276,7 @@ bool DcLootPolicy::CorpseHasTakeableLoot(Player* bot, Creature* creature, uint32
     // timeout used to absorb. "bag space" is percent USED; 100 == no free slot.
     PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot);
     bool const bagsFull =
-        botAI && botAI->GetAiObjectContext()->GetValue<uint8>("bag space")->Get() >= 100;
+        botAI && botAI->GetAiObjectContext()->GetValue<uint8>(DcKey::Stock::BagSpace)->Get() >= 100;
 
     for (LootItem const& item : loot.items)
     {

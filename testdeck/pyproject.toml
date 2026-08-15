@@ -1,0 +1,29 @@
+[project]
+name = "ac-testdeck"
+description = "Test Deck — a shareable web frontend for mod-dungeon-clear dungeon test runs"
+readme = "README.md"
+requires-python = ">=3.9"
+# Upper bounds as well as lower ones. The launcher pip-installs these on a
+# tester's machine on first run, so an unbounded range means whatever the
+# index serves that day lands on the host — a supply-chain decision nobody
+# made. Raise the ceilings deliberately when a new major is tested.
+dependencies = [
+    "fastapi>=0.100,<1.0",
+    "uvicorn>=0.23,<1.0",
+]
+dynamic = ["version"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7",
+    "httpx>=0.24",          # fastapi TestClient transport
+]
+
+[tool.setuptools]
+packages = ["testdeck", "testdeck.routes"]
+
+[tool.setuptools.dynamic]
+version = { attr = "testdeck.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["t"]

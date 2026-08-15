@@ -113,10 +113,16 @@ namespace
     }
 }
 
+namespace
+{
+    bool BfPullLever(Player* bot, AiObjectContext* context);
+    bool BfHoldCellDoor(Player* bot, AiObjectContext* context);
+}
+
 void RegisterBloodFurnaceEvents(std::vector<DungeonEvent>& out)
 {
     out.push_back(EventBuilder(542, 1, "Pull the Cell Door Lever")
-                      .Conditional(17)
+                      .Conditional(&BfPullLever)
                       .Repeatable()
                       .PanelBeforeBoss(/*Broggok*/ BF_BROGGOK)
                       // searchRadius covers condition 17's lever range (30yd) so a
@@ -126,7 +132,7 @@ void RegisterBloodFurnaceEvents(std::vector<DungeonEvent>& out)
                       .Build());
 
     out.push_back(EventBuilder(542, 2, "Hold the cell door")
-                      .Conditional(18)
+                      .Conditional(&BfHoldCellDoor)
                       .Repeatable()
                       .PanelBeforeBoss(/*Broggok*/ BF_BROGGOK)
                       // Plant the tank on the lever staging spot so the cell orcs
@@ -136,8 +142,3 @@ void RegisterBloodFurnaceEvents(std::vector<DungeonEvent>& out)
                       .Build());
 }
 
-void RegisterBloodFurnaceConditions(EventConditionMap& out)
-{
-    out[17] = &BfPullLever;
-    out[18] = &BfHoldCellDoor;
-}
