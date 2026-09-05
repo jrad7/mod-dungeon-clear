@@ -874,7 +874,6 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::TryBossNotPresentStal
 void DungeonClearAdvanceAction::FillStuckObs(AdvanceState& st, DungeonClearApproach::Observation& obs)
 {
     DcApproachState& appr = *st.appr;
-    uint32& rebuildAttempts = appr.rebuildAttempts;
     Position& lastPos = appr.lastPos;
 
     // Position-based stuck check via the shared route-glide watchdog. Sample the
@@ -1730,7 +1729,7 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoJumpLeg(AdvanceStat
 // A healthy in-flight continuous-spline glide just rides: NextHop already
 // advanced the cursor past the glided-over points, so re-issuing would
 // StopMoving + Launch a fresh escort and hitch.
-DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoRideLiveGlide(AdvanceState& st)
+DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoRideLiveGlide(AdvanceState& /*st*/)
 {
     // A glide being IN FLIGHT is the weakest possible evidence of progress — it is
     // the state a bot wedged against geometry sits in indefinitely, and clearing
