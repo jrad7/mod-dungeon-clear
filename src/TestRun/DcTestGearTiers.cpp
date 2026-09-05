@@ -88,9 +88,11 @@ namespace DcTestGearTiers
     {
         // Same map ids DcTestDungeonRegistry lists, grouped by expansion. The
         // Black Morass (269) and Old Hillsbrad (560) are Caverns of Time maps
-        // but TBC content, and are geared as such.
+        // but TBC content, and are geared as such. Gruul's Lair (565) is the
+        // TBC raid row — unlisted it would fall to the Classic ladder and cap
+        // a level-70 raid's gear at ilvl 92 without a word.
         static std::set<std::uint32_t> const tbc =
-            {269, 540, 542, 543, 545, 546, 547, 552, 553, 554, 555, 556, 557, 558, 560, 585};
+            {269, 540, 542, 543, 545, 546, 547, 552, 553, 554, 555, 556, 557, 558, 560, 565, 585};
         static std::set<std::uint32_t> const wotlk =
             {574, 575, 576, 578, 595, 599, 600, 601, 602, 604, 608, 619, 632, 650, 658, 668};
 

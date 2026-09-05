@@ -28,6 +28,7 @@ TEST(DcTestGearTiersTest, ExpansionOfKnownMaps)
     EXPECT_EQ(ExpansionOf(554), Expansion::Tbc);      // Mechanar
     EXPECT_EQ(ExpansionOf(269), Expansion::Tbc);      // Black Morass (CoT, TBC content)
     EXPECT_EQ(ExpansionOf(560), Expansion::Tbc);      // Old Hillsbrad (CoT, TBC content)
+    EXPECT_EQ(ExpansionOf(565), Expansion::Tbc);      // Gruul's Lair (TBC raid)
     EXPECT_EQ(ExpansionOf(595), Expansion::Wotlk);    // Culling of Stratholme (CoT, WotLK)
     EXPECT_EQ(ExpansionOf(668), Expansion::Wotlk);    // Halls of Reflection
 }

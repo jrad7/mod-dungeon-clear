@@ -94,12 +94,25 @@ namespace DcTestDungeonRegistry
             { "pos",             "Pit of Saron",                  658,   435.74f,   212.41f,  528.71f, 6.256f, 80, "", 80 },
             { "hor",             "Halls of Reflection",           668,  5239.01f,  1932.64f,  707.70f, 0.801f, 80, "", 80 },
 
-            // --- Classic RAIDS (raid-support Plan D/E). Entrances are the
-            // world-DB areatrigger targets (MC 2886, BWL 3726); level 60, no
-            // heroic mode; a raid run picks its size via `size=` (default 10
-            // for iteration speed — see the raid-support plan).
+            // --- RAIDS (raid-support Plan D/E). Entrances are the world-DB
+            // areatrigger targets (MC 2886, BWL 3726, Gruul 4535); no heroic
+            // mode (heroicLevel stays 0 — a raid's size is its difficulty); a
+            // raid run picks its size via `size=` (default 10 for iteration
+            // speed — see the raid-support plan). Classic rows run at 60.
             { "mc",              "Molten Core",                   409,  1091.89f,  -466.99f, -105.08f, 3.142f, 60, "" },
             { "bwl",             "Blackwing Lair",                469, -7673.03f, -1106.08f,  396.65f, 0.178f, 60, "" },
+            // Gruul's Lair (TBC, level 70, 25-man): two kill-credit encounters
+            // — High King Maulgar with his four-ogre council (instance
+            // MINIONS of his encounter, despawned on his death), then Gruul —
+            // down one linear corridor with 13 trash spawns. Both bosses
+            // auto-derive from BossSpawnIndex, so the map has no roster patch
+            // and no event file; the Maulgar portcullis (184468) is
+            // DOOR_TYPE_PASSAGE on his encounter and opens itself. The
+            // playerbots `gruulslair` strategy tanks Krosh with a MAGE and
+            // Kiggler with a BALANCE DRUID and expects three tanks; a drawn
+            // comp missing any of those leaves that ogre loose (pick the comp
+            // on the roster page when it matters).
+            { "gruul",           "Gruul's Lair",                  565,    62.78f,    35.46f,   -3.98f, 1.418f, 70, "" },
         };
         return rows;
     }

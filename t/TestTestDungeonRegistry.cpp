@@ -69,6 +69,19 @@ TEST(DcTestDungeonRegistryTest, FindByNumericMapId)
     EXPECT_STREQ(row->token, "deadmines");
 }
 
+TEST(DcTestDungeonRegistryTest, GruulsLairIsATbcRaidRow)
+{
+    // The first non-classic raid: runs at the TBC cap with no heroic mode
+    // (a raid's size is its difficulty), reachable by token and by map id.
+    Row const* row = Find("gruul");
+    ASSERT_NE(row, nullptr);
+    EXPECT_EQ(row->mapId, 565u);
+    EXPECT_EQ(row->recommendedLevel, 70u);
+    EXPECT_EQ(row->heroicLevel, 0u);
+    EXPECT_STREQ(row->wing, "");
+    EXPECT_EQ(Find("565"), row);
+}
+
 TEST(DcTestDungeonRegistryTest, NumericLookupOnWingSplitMapIsRefused)
 {
     // 429 = Dire Maul, three isolated wings; a bare mapId cannot pick one.
