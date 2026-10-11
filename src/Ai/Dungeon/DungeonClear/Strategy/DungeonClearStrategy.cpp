@@ -10,6 +10,7 @@
 #include "Ai/Dungeon/DungeonClear/Multiplier/DungeonClearMultiplier.h"
 #include "Ai/Dungeon/DungeonClear/Strategy/DcRelevance.h"
 #include "Playerbots.h"
+#include "Util/DcPlayerbotsExclusionType.h"
 
 void DungeonClearStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
 {
@@ -696,7 +697,8 @@ bool DungeonClearCombatStrategy::HasTargetExclusions() const
 void DungeonClearCombatStrategy::AppendTargetExclusions(GuidSet& exclusions,
                                                         TargetValueExclusionType type)
 {
-    // DPS, ATTACKER and — for rows that ask for it — TANK pools.
+    // DPS, DEBUFF (attacker-without-aura) and — for rows that ask for it — TANK
+    // pools, plus the AoE count that mod-playerbots #2912 added.
     //
     // The tank was untouched wholesale, on the reasoning that the encounters
     // needing this are the ones where somebody must still HOLD the creature
@@ -704,16 +706,25 @@ void DungeonClearCombatStrategy::AppendTargetExclusions(GuidSet& exclusions,
     // holds; it is exactly wrong for an OUT-OF-ORDER boss, where a tank answering
     // a creature two rooms ahead is the thing that walks the raid there. So the
     // carve-out moved into the row (`alsoTank`) rather than staying here.
-    if (type != TargetValueExclusionType::Dps &&
-        type != TargetValueExclusionType::Attacker &&
-        type != TargetValueExclusionType::Tank)
-        return;
-
-    bool const forTank = type == TargetValueExclusionType::Tank;
-
+    //
+    // The AoE type carries no role, so it is answered from the pool the bot would
+    // read for a single target: a barred creature should not be the reason a DPS
+    // starts a Blizzard, and the tank keeps counting whatever she is allowed to
+    // hold. The enumerators go through DcPbExclusion because #2912 renamed them
+    // and the module builds against playerbots on both sides of that change.
     Player* const self = botAI ? botAI->GetBot() : nullptr;
     if (!self)
         return;
+
+    bool const forAoe = DcPbExclusion::IsAoe(type);
+    if (!forAoe &&
+        type != DcPbExclusion::DpsTarget() &&
+        type != DcPbExclusion::DebuffTarget() &&
+        type != DcPbExclusion::TankTarget())
+        return;
+
+    bool const forTank = type == DcPbExclusion::TankTarget() ||
+                         (forAoe && PlayerbotAI::IsTank(self));
 
     uint32 const mapId = self->GetMapId();
     if (!DcTargetExclusionRegistry::HasRowsFor(mapId))
