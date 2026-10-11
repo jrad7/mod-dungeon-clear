@@ -15,7 +15,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from conftest import make_client                  # noqa: E402
-from testdeck.app import create_app, host_allowed, split_host   # noqa: E402
+from testdeck import config as tdconfig          # noqa: E402
+from testdeck.app import (SECURITY_HEADERS, create_app, host_allowed,  # noqa: E402
+                          security_headers_for, split_host)
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +270,182 @@ def test_security_headers_survive_a_rejection(cfg):
         r = c.get("/")                      # refused by restrict_to_lan
         assert r.status_code == 403
         assert r.headers["x-frame-options"] == "DENY"
+
+
+# ---------------------------------------------------------------------------
+# Framing: [server] allowed_frame_ancestors
+# ---------------------------------------------------------------------------
+
+
+def frame_ancestors(csp):
+    """The source list of the CSP frame-ancestors directive."""
+    for directive in csp.split(";"):
+        name, *sources = directive.split()
+        if name == "frame-ancestors":
+            return sources
+    raise AssertionError(f"no frame-ancestors in {csp!r}")
+
+
+def without_frame_ancestors(csp):
+    return [d.strip() for d in csp.split(";")
+            if not d.split()[0] == "frame-ancestors"]
+
+
+def load_server_section(tree, body):
+    toml = tree / "framing.toml"
+    toml.write_text(f'[paths]\nbase = "{tree}"\n[server]\n{body}\n')
+    return tdconfig.load(str(toml), app_dir=tree / "app")
+
+
+def test_framing_denied_by_default(cfg):
+    assert cfg.allowed_frame_ancestors == []
+    with make_client(cfg) as c:
+        for path in ("/", "/api/status"):
+            h = c.get(path).headers
+            assert frame_ancestors(h["content-security-policy"]) == ["'none'"]
+            assert h["x-frame-options"] == "DENY"
+
+
+def test_empty_frame_ancestor_list_keeps_the_default(tree):
+    cfg = load_server_section(tree, "allowed_frame_ancestors = []")
+    assert security_headers_for(cfg.allowed_frame_ancestors) is SECURITY_HEADERS
+
+
+def test_configured_origins_are_emitted_exactly(tree):
+    cfg = load_server_section(
+        tree, 'allowed_frame_ancestors = ["http://server-address:3000", '
+              '"https://WoWMin.example.com", "http://server-address:3000"]')
+    assert cfg.allowed_frame_ancestors == ["http://server-address:3000",
+                                           "https://wowmin.example.com"]
+    tdconfig.validate(cfg, check_privileges=False)
+    with make_client(cfg) as c:
+        for path in ("/", "/api/status"):
+            h = c.get(path).headers
+            csp = h["content-security-policy"]
+            assert frame_ancestors(csp) == ["http://server-address:3000",
+                                            "https://wowmin.example.com"]
+            # DENY would still win in browsers that honour it, and
+            # ALLOW-FROM is obsolete — the header must be gone outright.
+            assert "x-frame-options" not in h
+            # Nothing else moved.
+            assert (without_frame_ancestors(csp) == without_frame_ancestors(
+                SECURITY_HEADERS["Content-Security-Policy"]))
+            for k, v in SECURITY_HEADERS.items():
+                if k not in ("Content-Security-Policy", "X-Frame-Options"):
+                    assert h[k.lower()] == v
+
+
+def test_unconfigured_origins_remain_blocked(tree):
+    cfg = load_server_section(
+        tree, 'allowed_frame_ancestors = ["http://server-address:3000"]')
+    tdconfig.validate(cfg, check_privileges=False)
+    with make_client(cfg) as c:
+        sources = frame_ancestors(c.get("/").headers["content-security-policy"])
+    assert sources == ["http://server-address:3000"]
+    for other in ("'self'", "*", "http:", "https:",
+                  "http://server-address:3001", "https://server-address:3000",
+                  "http://evil.example", "http://*.server-address:3000"):
+        assert other not in sources
+
+
+def test_opened_framing_still_stamps_rejections(tree):
+    """The 403s from the LAN filter carry the opened policy too, and still
+    no X-Frame-Options."""
+    from fastapi.testclient import TestClient
+
+    cfg = load_server_section(
+        tree, 'allowed_frame_ancestors = ["https://wowmin.example.com"]')
+    tdconfig.validate(cfg, check_privileges=False)
+    with TestClient(create_app(cfg, start_collectors=False),
+                    client=("8.8.8.8", 51000),
+                    base_url="http://127.0.0.1:8999") as c:
+        r = c.get("/")
+        assert r.status_code == 403
+        assert frame_ancestors(r.headers["content-security-policy"]) == [
+            "https://wowmin.example.com"]
+        assert "x-frame-options" not in r.headers
+
+
+def test_opened_framing_leaves_host_and_lan_checks_alone(tree):
+    cfg = load_server_section(
+        tree, 'allowed_frame_ancestors = ["http://wowmin.lan:3000"]')
+    tdconfig.validate(cfg, check_privileges=False)
+    assert not host_allowed(cfg, "wowmin.lan:3000")
+    from fastapi.testclient import TestClient
+    with TestClient(create_app(cfg, start_collectors=False),
+                    client=("8.8.8.8", 51000),
+                    base_url="http://127.0.0.1:8999") as c:
+        assert c.get("/").status_code == 403
+    with make_client(cfg) as c:
+        assert c.get("/", headers={"host": "wowmin.lan:3000"}).status_code == 403
+        assert c.get("/api/testruns").status_code == 401
+
+
+@pytest.mark.parametrize("origin,want", [
+    ("http://server-address:3000", "http://server-address:3000"),
+    ("https://wowmin.example.com", "https://wowmin.example.com"),
+    ("HTTPS://WoWMin.Example.COM:443", "https://wowmin.example.com:443"),
+    ("  http://192.168.1.20:3000  ", "http://192.168.1.20:3000"),
+    ("http://[fd00::20]:3000", "http://[fd00::20]:3000"),
+    ("http://localhost", "http://localhost"),
+])
+def test_frame_origin_accepts_complete_origins(origin, want):
+    assert tdconfig.parse_frame_origin(origin) == want
+
+
+@pytest.mark.parametrize("origin", [
+    "",
+    "server-address:3000",                    # no scheme
+    "//server-address:3000",
+    "ftp://server-address",                   # wrong scheme
+    "ws://server-address:3000",
+    "file:///etc/passwd",
+    "data:text/html,x",
+    "javascript://x",
+    "http://",                                # no host
+    "http://:3000",
+    "*",                                      # wildcards
+    "http://*",
+    "https://*.example.com",
+    "http://server-address:*",
+    "http:",                                  # scheme-only sources
+    "'self'",                                 # CSP keywords
+    "'none'",
+    "http://user:pw@server-address:3000",     # credentials
+    "http://user@server-address",
+    "http://server-address:3000/",            # paths, even a bare slash
+    "http://server-address:3000/wowmin",
+    "http://server-address:3000?x=1",         # query
+    "http://server-address:3000?",
+    "http://server-address:3000#top",         # fragment
+    "http://server-address:3000#",
+    "http://server-address:0",                # bad ports
+    "http://server-address:65536",
+    "http://server-address:30a0",
+    "http://server-address:",
+    "http://server address",                  # directive smuggling
+    "http://a.example; script-src *",
+    "http://a.example,http://b.example",
+    "http://a.example\nX-Frame-Options: ALLOWALL",
+    "http://'a.example'",
+    "http://a..example",
+    "http://-a.example",
+    "http://[not-v6]:3000",
+    "http://[127.0.0.1]",
+])
+def test_frame_origin_rejects_malformed_or_unsafe(origin):
+    with pytest.raises(tdconfig.ConfigError):
+        tdconfig.parse_frame_origin(origin)
+
+
+@pytest.mark.parametrize("body", [
+    'allowed_frame_ancestors = "http://server-address:3000"',   # not a list
+    'allowed_frame_ancestors = [3000]',
+    'allowed_frame_ancestors = ["http://ok.example", "https://*.example.com"]',
+])
+def test_bad_frame_ancestors_refuse_to_load(tree, body):
+    with pytest.raises(tdconfig.ConfigError):
+        load_server_section(tree, body)
 
 
 # ---------------------------------------------------------------------------

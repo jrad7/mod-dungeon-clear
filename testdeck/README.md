@@ -257,6 +257,31 @@ checked by resolving the path and confirming containment. Every response
 carries a strict CSP, `X-Frame-Options: DENY` and `nosniff`. Do not expose it
 to the internet without a TLS reverse proxy in front.
 
+**Embedding in another page** (e.g. WoWMin) is off by default: the deck sends
+`frame-ancestors 'none'` and `X-Frame-Options: DENY`, so no page can frame it.
+To allow specific embedders, list their exact origins:
+
+```toml
+[server]
+allowed_frame_ancestors = ["https://wowmin.example.com"]
+```
+
+Then CSP `frame-ancestors` names exactly those origins and `X-Frame-Options`
+is omitted (DENY would still win, and `ALLOW-FROM` is obsolete). Every other
+header, the Host and LAN checks, login, CSRF and the audit log are unchanged.
+Entries must be complete `http://` or `https://` origins — credentials,
+paths (even a trailing `/`), queries, fragments and wildcards are refused at
+startup. Two requirements for it to work in practice:
+
+- **Mixed content.** An `https://` page cannot frame an `http://` deck; put
+  both behind HTTPS (or both on plain HTTP on the LAN).
+- **Same site.** The session cookie is `SameSite=Strict`, so it is only sent
+  when the embedding page and the deck share a site (registrable domain —
+  `wowmin.example.com` and `deck.example.com`, or one hostname on two ports).
+  From a different site the frame loads but login never sticks. Serve WoWMin
+  and Test Deck under the same hostname/site. If testers reach the deck by
+  that hostname, it also needs to be in `allowed_hosts`.
+
 **Revoking access** is `account set gmlevel <user> 0 -1`, and it takes effect
 within about a minute: authorization re-reads the account's GM level and ban
 state from the auth database on every request rather than trusting the level

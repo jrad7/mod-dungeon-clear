@@ -93,6 +93,26 @@ port = 8790
 # requiring an address — or a name you listed — is what closes it.
 #allowed_hosts = ["testdeck.lan", "deck.example.com"]
 
+# Origins allowed to show Test Deck inside an <iframe> — e.g. a WoWMin admin
+# panel. Empty (the default) refuses every framer: CSP frame-ancestors 'none'
+# plus X-Frame-Options: DENY. With entries, frame-ancestors names exactly these
+# origins and X-Frame-Options is left off (DENY would still block the frame).
+#
+# Each entry is a bare origin: http:// or https://, a host, an optional port.
+# No paths (not even a trailing "/"), queries, fragments, user:pass@ or "*".
+# It must match the address bar of the EMBEDDING page exactly — scheme, host
+# and port. Login, the Host check and allowed_nets still apply inside the frame.
+#
+# Two things decide whether the embedded deck actually works:
+#  * Mixed content: an https:// page cannot frame an http:// deck. Serve both
+#    over HTTPS, or both over plain HTTP on the LAN.
+#  * The login cookie is SameSite=Strict, so the browser only sends it when the
+#    embedding page and the deck are the same SITE (same registrable domain,
+#    e.g. wowmin.example.com + deck.example.com, or one hostname on two ports).
+#    Embedded from a different site, the frame loads but login never sticks.
+#    Serve WoWMin and Test Deck under the same hostname/site.
+#allowed_frame_ancestors = ["http://server-address:3000"]
+
 [auth]
 # Login uses real game accounts, verified against the auth database (SRP6).
 # The gmlevel is re-read from the database on every request (cached ~1 minute),
