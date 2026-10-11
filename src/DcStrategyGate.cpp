@@ -93,6 +93,16 @@ namespace DcStrategyGate
         else if (inDungeon && !map->IsRaid() && hasWorldbuff)
             botAI->ChangeStrategy("-worldbuff", BOT_STATE_NON_COMBAT);
 
+        // Eat/drink. A bot inside a dungeon that is missing playerbots' `food`
+        // non-combat strategy never consumes between pulls: it stands at the
+        // rest spot and regens at the passive tick rate, which stretches a run
+        // from minutes to hours. The strategy is a stock default but can be
+        // lost (manual `nc -food`, a reset that rebuilt the engine without it,
+        // or a bot whose saved strategy list predates it). Install it, never
+        // strip it — outside a dungeon the bot's own defaults own that choice.
+        if (inDungeon && !botAI->HasStrategy("food", BOT_STATE_NON_COMBAT))
+            botAI->ChangeStrategy("+food", BOT_STATE_NON_COMBAT);
+
         // Each strategy in the engine it does NOT belong to. Never correct; see
         // the Plan comment in the header for how a bot gets into that state and
         // why it is otherwise permanent.
