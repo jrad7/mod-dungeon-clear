@@ -19,6 +19,9 @@
 namespace DcLabOracles
 {
     using namespace DcLab;
+    // DcLab::Unit is spelled out below: through the using-directive a bare
+    // `Unit` is ambiguous with the core's ::Unit as soon as this file sees a
+    // declaration of it (e.g. when modules are compiled with the game PCH).
 
     namespace
     {
@@ -154,7 +157,7 @@ namespace DcLabOracles
 
         std::string UnitName(Index const& ix, std::uint64_t g)
         {
-            if (Unit const* u = ix.tr.FindUnit(g))
+            if (DcLab::Unit const* u = ix.tr.FindUnit(g))
                 return u->name.empty() ? DcLabJson::HexGuid(g) : u->name;
             if (Member const* m = ix.tr.FindMember(g))
                 return m->name;
@@ -591,7 +594,7 @@ namespace DcLabOracles
             // it either. Synthetic scenario actors carry a pack and stay counted.
             auto counted = [&](std::uint64_t g)
             {
-                Unit const* u = ix.tr.FindUnit(g);
+                DcLab::Unit const* u = ix.tr.FindUnit(g);
                 return !(u && u->spawnId == 0 && u->pack.empty());
             };
             std::map<std::uint64_t, std::uint32_t> engagedAt;
@@ -672,13 +675,13 @@ namespace DcLabOracles
                             "pull #" + std::to_string(w.seq) + " engaged " + std::to_string(n) + " vs predicted " +
                                 std::to_string(w.predicted));
                 }
-                Unit const* tu = ix.tr.FindUnit(w.target);
+                DcLab::Unit const* tu = ix.tr.FindUnit(w.target);
                 std::string const pack = tu ? tu->pack : std::string();
                 if (pack.empty())
                     continue;
                 for (std::uint64_t g : mobs)
                 {
-                    Unit const* u = ix.tr.FindUnit(g);
+                    DcLab::Unit const* u = ix.tr.FindUnit(g);
                     if (!u || u->pack == pack)
                         continue;
                     ++outside;
@@ -915,7 +918,7 @@ namespace DcLabOracles
             }
             Frame const& last = ix.tr.frames.back();
             std::vector<std::string> const& goals = ix.tr.header.goalPacks;
-            auto isGoal = [&](Unit const& u)
+            auto isGoal = [&](DcLab::Unit const& u)
             {
                 if (goals.empty())
                     return !u.pack.empty();
@@ -926,7 +929,7 @@ namespace DcLabOracles
             };
             std::uint32_t goalTotal = 0, goalAlive = 0;
             std::string aliveName;
-            for (Unit const& u : ix.tr.units)
+            for (DcLab::Unit const& u : ix.tr.units)
             {
                 if (!isGoal(u))
                     continue;
