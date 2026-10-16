@@ -2197,6 +2197,12 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
         return false;
 
     char const* rezAction = RezActionNameFor(bot->getClass());
+    // Any other class was elected through the spell it knows (IsRezClass ->
+    // KnownResurrectSpell); cast that one by name, the same lookup the four
+    // stock names go through.
+    if (!rezAction)
+        if (SpellInfo const* known = DcRezRecovery::KnownResurrectSpell(bot))
+            rezAction = known->SpellName[0];
     if (!rezAction)
         return false;  // election guarantees a rez class; belt-and-braces
 
