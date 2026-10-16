@@ -688,7 +688,11 @@ public:
             return;
         if (!creature->IsSummon() || !creature->IsAlive() || !DcModule::IsEnabled())
             return;
-        constexpr float STRAT_CRITTER_FALL_YD = 20.0f;
+        // 6yd, not 20: the Undead-side rat trap (portcullis 175354, around
+        // 3917,-3556) has the same gap, and at 20yd the tank had already
+        // followed its rat through the floor. Despawning a critter that merely
+        // walked down a slope is harmless: the trap gates reopen on a timer.
+        constexpr float STRAT_CRITTER_FALL_YD = 6.0f;
         float const homeZ = creature->GetHomePosition().GetPositionZ();
         if (creature->GetPositionZ() >= homeZ - STRAT_CRITTER_FALL_YD)
             return;
