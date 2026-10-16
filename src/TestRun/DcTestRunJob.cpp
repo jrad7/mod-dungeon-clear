@@ -2046,13 +2046,19 @@ void DcTestRunJob::TickMonitoring(uint32 dt)
                 DcTestRunRecord::BossKill kill;
                 kill.t = _totalMs / 1000;
                 kill.via = "mask";
+                // Prefer the boss: an objective sharing the bit (the Iron Clad
+                // Door on Mr. Smite's 3) sorts first by the objective-before-boss
+                // tie-break and would otherwise take the boss's kill. A bit that
+                // only an objective owns (Stratholme's Dathrohan 6, Slaughterhouse
+                // 11) keeps the objective's name.
                 for (BossRef const& ref : _roster)
-                    if (ref.encounterIndex == bit)
+                    if (ref.encounterIndex == bit && (ref.isBoss || kill.name.empty()))
                     {
                         kill.entry = ref.entry;
                         kill.name = ref.name;
-                        break;
-                    }
+                        if (ref.isBoss)
+                            break;
+                    }      
                 if (kill.name.empty())
                     kill.name = "encounter #" + std::to_string(bit);
                 _record.bossTimeline.push_back(kill);
