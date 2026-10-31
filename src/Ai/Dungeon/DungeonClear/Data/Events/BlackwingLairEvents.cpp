@@ -531,6 +531,11 @@ void RegisterBlackwingLairEvents(std::vector<DungeonEvent>& out)
         EventBuilder(MAP_ID, EVENT_RAZORGORE_ORB, "Razorgore — orb and egg run")
             .Conditional(&RazorgoreEggRunDue)
             .Repeatable()
+            // Display only: list the row between Grethok and Razorgore, where the
+            // run actually does it, instead of at the bottom with the off-path
+            // events. Deliberately NOT PanelBeforeBoss(Razorgore): that flag also
+            // stands the pull pipeline down near the boss it names.
+            .PanelAfterBoss(NPC_GRETHOK_THE_CONTROLLER)
             .Optional()
             .DrivesInCombat()
             .EncounterActive()

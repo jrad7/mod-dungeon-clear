@@ -380,7 +380,24 @@ std::string DcStatusPublisher::BuildStatusPayload(PlayerbotAI* botAI)
                 AI_VALUE(DcApproachState&, DcKey::ApproachState).longPathTargetEntry;
             bool const routeReady = next.has_value() && pathTarget == next->entry;
 
-            if (phase == "recovering")
+            // The conditional-event rung tags its ticks "event" (orb run, transit,
+            // gossips, levers). Name the event, or the panel falls through to
+            // "Idle" while the tank is plainly busy. The progress record guards
+            // against a stale token, but its eventId outlives the event, so ask
+            // whether Drive ran it recently and it still has steps left.
+            DungeonEventProgress const& eventProg =
+                context->GetValue<DungeonEventProgress&>(DcKey::ConditionalEventProgress)->Get();
+            DungeonEvent const* runningEvent =
+                (phase == "event" && DungeonEventExecutor::IsProgressFresh(eventProg, bot->GetMapId()))
+                    ? DungeonEventRegistry::Find(bot->GetMapId(), eventProg.eventId)
+                    : nullptr;
+
+            if (runningEvent)
+            {
+                stateStr = "event";
+                detail = "Running event: " + runningEvent->name + ".";
+            }
+            else if (phase == "recovering")
             {
                 stateStr = "recovering";
                 detail = "Stuck; replanning the route to " + bossName + ".";
@@ -390,12 +407,17 @@ std::string DcStatusPublisher::BuildStatusPayload(PlayerbotAI* botAI)
                 stateStr = "pursuing";
                 detail = "Closing in on " + bossName + ".";
             }
-            else if (next.has_value() && !routeReady)
+            else if (next.has_value() && (!routeReady || phase == "planning route"))
             {
                 // A boss is selected but no route to it is cached yet: the tank
                 // is between picking the target and its first path build.
                 stateStr = "pathing";
                 detail = "Plotting a route to " + bossName + ".";
+            }
+            else if (phase == "swimming")
+            {
+                stateStr = "moving";
+                detail = next.has_value() ? ("Swimming toward " + bossName + ".") : "Swimming.";
             }
             else if (phase == "moving" || bot->isMoving())
             {

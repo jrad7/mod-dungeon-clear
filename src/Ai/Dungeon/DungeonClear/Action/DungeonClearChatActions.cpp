@@ -764,6 +764,10 @@ bool DcBossesAction::Execute(Event event)
                 panelRows.push_back(info);
     }
 
+    // Bosses this pass reports dead or skipped, so the event pass below can tell
+    // when the raid has moved past a repeatable event that never latches.
+    std::unordered_set<uint32> passedBossRows;
+
     for (DungeonBossInfo const& info : panelRows)
     {
         // Travel objectives (BossRosterRegistry) are not creatures and carry no
@@ -832,6 +836,8 @@ bool DcBossesAction::Execute(Event event)
             statusStr = "missing";
         else
             statusStr = "alive";  // exists in the instance, grid not yet loaded
+        if (statusStr == "dead" || statusStr == "skipped")
+            passedBossRows.insert(info.entry);
 
         // Wing label for split maps (empty for single-wing dungeons). On a
         // whole-dungeon Maraudon run this is the only place the wing surfaces
@@ -943,7 +949,7 @@ bool DcBossesAction::Execute(Event event)
         }
 
         uint32 const latchKey = DungeonEventExecutor::ConditionalLatchKey(ev->id);
-        std::string const evStatus =
+        std::string evStatus =
             cleared.count(latchKey) ? "dead"
             : skipped.count(latchKey) ? "skipped"
                                       : "alive";
@@ -981,6 +987,26 @@ bool DcBossesAction::Execute(Event event)
                     idxField = std::to_string(BossOrderKey(info)) + ".5";
                     break;
                 }
+        }
+
+        // A repeatable event is never latched (it has to stay re-runnable after a
+        // wipe), so on its own it would read "alive" for the rest of the run. Once
+        // the first boss sorting after it is dead or skipped the raid is past it:
+        // report it done. Off-path events (index 99) have no boss after them and
+        // keep their latch status.
+        if (ev->repeatable && evStatus == "alive")
+        {
+            double const evIdx = std::stod(idxField);
+            DungeonBossInfo const* nextBoss = nullptr;
+            for (DungeonBossInfo const& info : bosses)
+            {
+                if (info.kind != DungeonAnchorKind::Boss || BossOrderKey(info) <= evIdx)
+                    continue;
+                if (!nextBoss || BossOrderKey(info) < BossOrderKey(*nextBoss))
+                    nextBoss = &info;
+            }
+            if (nextBoss && passedBossRows.count(nextBoss->entry))
+                evStatus = "dead";
         }
 
         std::ostringstream evMsg;

@@ -1136,28 +1136,38 @@ bool DcTargeting::IsCreaturePresentOnMap(Player* bot, uint32 entry)
     return bot->FindNearestCreature(entry, DC_SUMMON_SCAN_RANGE, /*alive*/ true) != nullptr ||
            bot->FindNearestCreature(entry, DC_SUMMON_SCAN_RANGE, /*alive*/ false) != nullptr;
 }
+
+namespace
+{
+    // The first unretired conditional event that summons `bossEntry`, or null.
+    DungeonEvent const* FindPendingSummonEvent(Player* bot, AiObjectContext* ctx, uint32 bossEntry)
+    {
+        if (!bot || !ctx || !bossEntry)
+            return nullptr;
+        Map* map = bot->GetMap();
+        if (!map)
+            return nullptr;
+
+        auto const& cleared =
+            ctx->GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get();
+        for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(map->GetId(), DcDifficulty::Of(map)))
+        {
+            if (ev->panelGatesBossEntry != bossEntry)
+                continue;
+            // Retired (skipped via `dc skip` inserts the latch key into cleared). A
+            // Repeatable summon event is otherwise never latched, so it stays
+            // "pending" for the whole encounter until the boss it gates is live/dead.
+            if (cleared.count(DungeonEventExecutor::ConditionalLatchKey(ev->id)))
+                continue;
+            return ev;
+        }
+        return nullptr;
+    }
+}
+
 bool DcTargeting::HasPendingSummonEvent(Player* bot, AiObjectContext* ctx, uint32 bossEntry)
 {
-    if (!bot || !ctx || !bossEntry)
-        return false;
-    Map* map = bot->GetMap();
-    if (!map)
-        return false;
-
-    auto const& cleared =
-        ctx->GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get();
-    for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(map->GetId(), DcDifficulty::Of(map)))
-    {
-        if (ev->panelGatesBossEntry != bossEntry)
-            continue;
-        // Retired (skipped via `dc skip` inserts the latch key into cleared). A
-        // Repeatable summon event is otherwise never latched, so it stays
-        // "pending" for the whole encounter until the boss it gates is live/dead.
-        if (cleared.count(DungeonEventExecutor::ConditionalLatchKey(ev->id)))
-            continue;
-        return true;
-    }
-    return false;
+    return FindPendingSummonEvent(bot, ctx, bossEntry) != nullptr;
 }
 
 bool DcTargeting::IsHoldingForSummonEvent(Player* bot, AiObjectContext* ctx,
@@ -1167,12 +1177,16 @@ bool DcTargeting::IsHoldingForSummonEvent(Player* bot, AiObjectContext* ctx,
     // comfortably contain the wave-fight spread (RFD's gong summons reach ~55yd)
     // AND bridge the anchor-to-spawn gap (the gong is ~83yd from Tuten'kash's
     // summon spot) so the hold stays continuous as the tank closes on him.
+    // An event may shrink it (DungeonEvent::summonHoldRadius) where trash the
+    // party still has to clear stands inside it.
     constexpr float DC_EVENT_BOSS_HOLD_RADIUS = 80.0f;
 
     if (!bot || !ctx || next.kind != DungeonAnchorKind::Boss)
         return false;
-    if (!HasPendingSummonEvent(bot, ctx, next.entry))
+    DungeonEvent const* ev = FindPendingSummonEvent(bot, ctx, next.entry);
+    if (!ev)
         return false;
+    float const holdRadius = ev->summonHoldRadius > 0.0f ? ev->summonHoldRadius : DC_EVENT_BOSS_HOLD_RADIUS;
 
     // Hold (suppress the dynamic pull) while parked at the gong to ring AND,
     // crucially, AFTER the boss is summoned while the tank closes to engage it.
@@ -1182,11 +1196,11 @@ bool DcTargeting::IsHoldingForSummonEvent(Player* bot, AiObjectContext* ctx,
     // covers the whole gong->summon-spot corridor, so the pull never re-arms
     // mid-encounter. Released once the boss dies: its credit bit flips and
     // NextDungeonBossValue advances `next` past it (this returns false then).
-    if (bot->GetDistance(next.x, next.y, next.z) <= DC_EVENT_BOSS_HOLD_RADIUS)
+    if (bot->GetDistance(next.x, next.y, next.z) <= holdRadius)
         return true;
     Creature* live = GetLiveBoss(bot, ctx, next.entry);
     return live && bot->GetDistance(live->GetPositionX(), live->GetPositionY(),
-                                    live->GetPositionZ()) <= DC_EVENT_BOSS_HOLD_RADIUS;
+                                    live->GetPositionZ()) <= holdRadius;
 }
 
 InstanceScript* DcTargeting::GetInstanceScript(Player* bot)

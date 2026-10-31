@@ -132,6 +132,13 @@ namespace DcTestDungeonRegistry
             // speed — see the raid-support plan). Classic rows run at 60.
             { "mc",              "Molten Core",                   409,  1091.89f,  -466.99f, -105.08f, 3.142f, 60, "" },
             { "bwl",             "Blackwing Lair",                469, -7673.03f, -1106.08f,  396.65f, 0.178f, 60, "" },
+            // The other classic raids, from the same table (ZG 3928, AQ20 4008,
+            // AQ40 4010, Onyxia 2848). Onyxia runs at 80: the 3.3.5 core ships her
+            // level-80 revamp, so a realm that de-levels her passes `level=60`.
+            { "zg",              "Zul'Gurub",                     309, -11916.10f, -1230.53f,  92.53f, 4.719f, 60, "" },
+            { "aq20",            "Ruins of Ahn'Qiraj",            509, -8429.74f,  1512.14f,   31.91f, 2.580f, 60, "" },
+            { "aq40",            "Temple of Ahn'Qiraj",           531, -8231.33f,  2010.60f,  129.33f, 0.930f, 60, "" },
+            { "ony",             "Onyxia's Lair",                 249,    29.16f,   -71.34f,   -8.18f, 4.580f, 80, "" },
             // Gruul's Lair (TBC, level 70, 25-man): two kill-credit encounters
             // — High King Maulgar with his four-ogre council (instance
             // MINIONS of his encounter, despawned on his death), then Gruul —

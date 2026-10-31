@@ -32,6 +32,7 @@ TEST(DcTestGearTiersTest, ExpansionOfKnownMaps)
     EXPECT_EQ(ExpansionOf(532), Expansion::Tbc);      // Karazhan (TBC raid)
     EXPECT_EQ(ExpansionOf(595), Expansion::Wotlk);    // Culling of Stratholme (CoT, WotLK)
     EXPECT_EQ(ExpansionOf(668), Expansion::Wotlk);    // Halls of Reflection
+    EXPECT_EQ(ExpansionOf(249), Expansion::Wotlk);    // Onyxia's Lair (3.3.5 level-80 revamp)
 }
 
 TEST(DcTestGearTiersTest, EveryRegistryRowIsClassified)

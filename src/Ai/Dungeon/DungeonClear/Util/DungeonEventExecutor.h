@@ -264,6 +264,12 @@ public:
     // so pass the context of the bot whose run state you mean (the leader's).
     static bool IsPersistentAnchoredEventActive(AiObjectContext* context);
 
+    // True when `prog` names an event that is not finished and that Drive ran
+    // within the stale gap, the same window Drive uses to tell a continuation
+    // from a fresh activation. eventId on its own is not enough: it stays set
+    // after the event completes and is only cleared on an instance change.
+    static bool IsProgressFresh(DungeonEventProgress const& prog, uint32 mapId);
+
     // True when the tank has ARRIVED at objective `next`: a persistent anchored
     // event is already driving it, the tank is within its arriveRadius, or its
     // gate creature is up anywhere on the map. The one arrival predicate — the

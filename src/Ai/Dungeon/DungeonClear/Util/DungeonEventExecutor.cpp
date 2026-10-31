@@ -1827,6 +1827,14 @@ bool DungeonEventExecutor::ObjectiveArrived(Player* bot, AiObjectContext* contex
     return false;
 }
 
+bool DungeonEventExecutor::IsProgressFresh(DungeonEventProgress const& prog, uint32 mapId)
+{
+    if (!prog.eventId || getMSTimeDiff(prog.lastDriveMs, getMSTime()) > EventStaleGapMs())
+        return false;
+    DungeonEvent const* ev = DungeonEventRegistry::Find(mapId, prog.eventId);
+    return ev && prog.stepIndex < ev->steps.size();
+}
+
 bool DungeonEventExecutor::IsPersistentAnchoredEventActive(AiObjectContext* context)
 {
     if (!context)

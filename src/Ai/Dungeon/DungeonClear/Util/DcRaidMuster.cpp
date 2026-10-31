@@ -188,7 +188,7 @@ bool DcRaidMuster::Holds(Player* bot, PlayerbotAI* botAI, AiObjectContext* conte
                          "off to full before the pull", bot->GetName(), next.name);
                 DcStatusPublisher::SendAddonMessage(
                     botAI, "CHAT	Mustering at " + next.name +
-                               " â topping off before the pull.");
+                               " — topping off before the pull.");
                 break;
             case DcRaidMusterDecision::Phase::Rebuffing:
                 LOG_INFO("playerbots.dungeonclear",

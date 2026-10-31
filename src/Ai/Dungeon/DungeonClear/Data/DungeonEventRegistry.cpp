@@ -121,6 +121,12 @@ EventBuilder& EventBuilder::PanelBeforeBoss(uint32 bossEntry)
     return *this;
 }
 
+EventBuilder& EventBuilder::SummonHoldRadius(float yards)
+{
+    _ev.summonHoldRadius = yards;
+    return *this;
+}
+
 EventBuilder& EventBuilder::PanelAfterBoss(uint32 bossEntry)
 {
     _ev.panelSortAfterBossEntry = bossEntry;
@@ -597,6 +603,8 @@ namespace
             RegisterDrakTharonKeepEvents(t);
             RegisterGundrakEvents(t);
             RegisterMoltenCoreEvents(t);
+            RegisterZulGurubEvents(t);
+            RegisterTempleOfAhnQirajEvents(t);
             RegisterVioletHoldEvents(t);
             RegisterBlackwingLairEvents(t);
             RegisterHallsOfStoneEvents(t);

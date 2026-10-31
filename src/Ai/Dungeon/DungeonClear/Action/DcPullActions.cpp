@@ -253,7 +253,14 @@ namespace
             boss->EngageWithTarget(bot);
             // ...and this makes his AI actually pick the tank up and come, rather
             // than merely holding threat while standing still.
-            if (boss->AI())
+            //
+            // Not when his script has switched combat movement off. AttackStart
+            // then only plants him (ScriptedAI::AttackStartNoMove -> MoveIdle),
+            // which cancels whatever path JustEngagedWith just started. Jeklik is
+            // that boss: her engage flies her down from the cave, and MoveIdle
+            // left her passive up there, never reaching the path end that turns
+            // her aggressive (tr-20261027-001452-1, ten minutes at her ledge).
+            if (boss->AI() && boss->IsCombatMovementAllowed())
                 boss->AI()->AttackStart(bot);
         }
 
@@ -2017,9 +2024,28 @@ namespace
             bool const aliveIdle = pulled && pulled->IsAlive() && !pulled->IsInCombat();
             // sameTarget compares against the OLD latch before we re-stamp it.
             bool const sameTarget = aliveIdle && pull.fizzleTarget == pull.pullTarget;
-            bool const handoff = DungeonClearMath::ShouldHandoffFizzledPull(
+            // A force-aggro boss is never handed off: the walk-in engage cannot
+            // start the fight the force exists to start (Jeklik is passive and
+            // out of line of sight on her ledge), so the hand-off only stalls the
+            // run. Its pull fizzles when trash flags the tank while it forms —
+            // the camp fight is then with the trash and the boss never hears of
+            // it (tr-20261027-025826-2, bats, twice). Re-forming retries the force.
+            BossPullback const* const forceRow = aliveIdle
+                ? BossPullbackRegistry::Find(bot->GetMapId(), pulled->GetEntry())
+                : nullptr;
+            bool const forced = forceRow && forceRow->forceAggroRange > 0.0f;
+            if (forced)
+            {
+                DC_PULL_INFO("[DC:{}] pull-back: {} still idle after the camp fight "
+                             "({:.0f}% hp, {:.1f}yd) -> forcing it again on the next "
+                             "pull", bot->GetName(), pull.pullTarget.ToString(),
+                             pulled->GetHealthPct(), bot->GetExactDist(pulled));
+                pull.fizzleTarget = ObjectGuid::Empty;
+                pull.fizzleCount = 0;
+            }
+            bool const handoff = !forced && DungeonClearMath::ShouldHandoffFizzledPull(
                 aliveIdle, sameTarget, DC_PULL_FIZZLE_MAX, pull.fizzleCount);
-            if (aliveIdle)
+            if (aliveIdle && !forced)
             {
                 if (!sameTarget)
                     pull.fizzleTarget = pull.pullTarget;

@@ -749,6 +749,13 @@ struct DungeonEvent
     // engine ordering, only the status panel.
     uint32 panelGatesBossEntry{0};
 
+    // Conditional events with panelGatesBossEntry only. How close to the gated
+    // boss's anchor, or to the boss once it is up, DcTargeting::
+    // IsHoldingForSummonEvent stands the dynamic pull down. 0 => the default
+    // 80yd, sized for the RFD gong waves. Shrink it where trash the party still
+    // has to clear stands inside 80yd of the anchor (Zul'Gurub's gong).
+    float summonHoldRadius{0.0f};
+
     // Conditional events only, panel cosmetics. Like panelGatesBossEntry but
     // sorts the event just AFTER the named boss and keeps it as its OWN numbered
     // row (panelGatesBossEntry instead FOLDS the event into the boss's row as a
@@ -811,6 +818,9 @@ public:
     EventBuilder& HeroicOnly();
     EventBuilder& NormalOnly();
     EventBuilder& PanelBeforeBoss(uint32 bossEntry);
+    // Pull stand-down radius around the boss PanelBeforeBoss names. See
+    // DungeonEvent::summonHoldRadius.
+    EventBuilder& SummonHoldRadius(float yards);
     // Sort this standalone event just AFTER `bossEntry` in the panel, keeping it
     // as its own numbered row (unlike PanelBeforeBoss, which folds the event into
     // the boss's row). See DungeonEvent::panelSortAfterBossEntry.

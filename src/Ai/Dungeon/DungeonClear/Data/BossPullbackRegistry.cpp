@@ -84,6 +84,17 @@ namespace
             // normal way (his patrol starts when the party reaches the camp,
             // inside AT 2066). See DcBlackrockSpire::BEAST_CAMP_*.
             { 229, 10430, 60.0f, -540.0f, 111.0f, 0.0f, false },
+            // Zul'Gurub — High Priestess Jeklik. Not a bad-ground row either: she
+            // waits REACT_PASSIVE on a cave ledge 12yd above the floor that has no
+            // navigable route, so the closest the tank gets is underneath it, out
+            // of line of sight. Playerbots drops her as an invalid target every
+            // tick and nothing ever starts the fight (tr-20261026-221350-1 sat
+            // there 15 minutes). Forcing her into combat runs her own intro: bat
+            // form, one waypoint down to the floor, then she fights. The camp is
+            // a floor point the tank stood on in that run, 14yd from her. Her
+            // script turns combat movement off, so the force skips AttackStart
+            // (see DcForceBossAggroOnTank): it would cancel that flight.
+            { 309, 14517, -12286.9f, -1384.0f, 132.9f, 40.0f, false },
         };
         return rows;
     }
