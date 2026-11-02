@@ -38,6 +38,9 @@
 //     spawn (the RFD-gong summon shape); the boss anchor after it owns the
 //     fight, completion via boss-state slot 9.
 //
+// Clear order: Baron Geddon goes before Shazzrah, against their DBC bits (5 and
+// 4). Only the order keys swap; both keep their real kill-bits.
+//
 // Index-space note (the Drak'Tharon lesson, inverted): the two added bosses
 // use doneBossStateIndex — the ONE sanctioned GetBossState seam — because the
 // slots (8/9) are authored explicitly from molten_core.h's DATA_ constants,
@@ -55,6 +58,8 @@ namespace
 {
     constexpr uint32 kMapId = 409;
 
+    constexpr uint32 kShazzrah  = 12264;
+    constexpr uint32 kGeddon    = 12056;
     constexpr uint32 kMajordomo = 12018;
     constexpr uint32 kRagnaros  = 11502;
 
@@ -129,8 +134,12 @@ void RegisterMoltenCoreRoster(std::vector<BossRosterPatch>& t)
     BossRosterPatch p;
     p.mapId = kMapId;
 
-    // The eight statics keep their derived DBC order (bits 0-7 match the
-    // classic clear path). The finale slots in after them.
+    // The eight statics keep their derived DBC order (bits 0-7) except for
+    // Geddon and Shazzrah, who swap. The finale slots in after them.
+    p.reorder = {
+        { kGeddon,   4 },
+        { kShazzrah, 5 },
+    };
     p.add.push_back(MakeBoss(kMajordomo, kMapId, "Majordomo Executus",
                              kMajX, kMajY, kMajZ, /*completionFrom*/ 0,
                              /*orderOverride*/ 8, kSlotMajordomo));

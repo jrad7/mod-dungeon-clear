@@ -40,9 +40,17 @@ TEST(DcMoltenCoreTest, RosterAppendsTheFinaleInOrder)
         BossRosterRegistry::Apply(kMap, DcDiffKey::Raid(0), Statics());
     ASSERT_EQ(out.size(), 11u);
 
-    // The eight statics keep their derived order...
+    // The eight statics clear in DBC order, except Geddon before Shazzrah...
+    uint32 const order[] = {12118, 11982, 12259, 12057, 12056, 12264, 12098, 11988};
     for (uint32 i = 0; i < 8; ++i)
-        EXPECT_EQ(out[i].encounterIndex, i) << i;
+    {
+        EXPECT_EQ(out[i].entry, order[i]) << i;
+        EXPECT_EQ(BossOrderKey(out[i]), i) << i;
+    }
+
+    // ...and the swap leaves their real kill-bits alone...
+    EXPECT_EQ(out[4].encounterIndex, 5u);  // Geddon
+    EXPECT_EQ(out[5].encounterIndex, 4u);  // Shazzrah
 
     // ...then Majordomo, the summon objective, and Ragnaros.
     EXPECT_EQ(out[8].entry, 12018u);
