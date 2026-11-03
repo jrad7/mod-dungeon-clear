@@ -107,9 +107,11 @@ inline constexpr DcSettingDef kDcSettings[] =
     { "Enable",                DcType::Bool,   1,   0,   1,  false },
 
     // Which tank bot drives the clear (DcLeaderElection::Mode). 0: DC's own
-    // rule. 1: mod-playerbots' main tank, so the tank DC drives is the one the
-    // playerbots raid strategies treat as main tank. Server-only, and read with
-    // no run owner: FindLeaderTank is how a run owner is found.
+    // rule. 1: mod-playerbots' main-tank rule, the same tank as GetMainTankGuid
+    // when that is a live tank bot on the map. Server-only, and read with no run
+    // owner: FindLeaderTank is how a run owner is found. The conf value is not
+    // clamped to this range; DcLeaderElection::ModeFromConfig reads any value
+    // but 1 as 0.
     { "LeaderElection",        DcType::UInt,   0,   0,   1,  false },
 
     { "LootMinQuality",        DcType::UInt,   0,   0,   6,  true  },

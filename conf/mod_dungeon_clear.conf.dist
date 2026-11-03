@@ -91,9 +91,11 @@ DungeonClear.Enable = 1
 #                that leads the run, so the playerbots raid strategies treat the
 #                leader as main tank and the other tanks as off tanks.
 #        Only a live tank bot on the same map can lead. When the tank marked
-#        Main Tank (or, in mode 1, the first tank in the group) is a real
-#        player, dead or elsewhere, the pick moves on to the next tank bot, and
-#        in mode 1 the leader is then not playerbots' main tank.
+#        Main Tank is a real player, dead or elsewhere, or (mode 1) the first
+#        live tank in the group is a real player or elsewhere, it is skipped and
+#        the rest of the rule picks among the tank bots (mode 0: best gear in a
+#        raid, lowest GUID in a party; mode 1: the first in the group). In mode 1
+#        the leader is then not playerbots' main tank.
 #        Any value but 1 is read as 0.
 #
 #        Default: 0

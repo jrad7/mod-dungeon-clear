@@ -357,7 +357,7 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
     // sub-groups — so each member sees the same candidate set and elects the
     // same leader. A real-player tank has no PlayerbotAI to run the clear, so it
     // is never a candidate. The rule itself is DcLeaderElection::Elect; its
-    // run-owner rule relies on DcOnAction keeping one run per group.
+    // run-owner rule relies on DcOnAction keeping one run per map.
     bool const isRaid = group->isRaidGroup();
     DcLeaderElection::Mode const mode = DcLeaderElection::ModeFromConfig(
         DcSettings::GetUInt(ObjectGuid::Empty, "LeaderElection"));
