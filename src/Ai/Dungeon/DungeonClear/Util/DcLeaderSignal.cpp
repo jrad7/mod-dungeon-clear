@@ -356,9 +356,10 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
     // GetFirstMember walks every member of the group — including all raid
     // sub-groups — so each member sees the same candidate set and elects the
     // same leader. A real-player tank has no PlayerbotAI to run the clear, so it
-    // is never a candidate. The rule itself is DcLeaderElection::Elect.
+    // is never a candidate. The rule itself is DcLeaderElection::Elect; its
+    // run-owner rule relies on DcOnAction keeping one run per group.
     bool const isRaid = group->isRaidGroup();
-    DcLeaderElection::Mode const mode = static_cast<DcLeaderElection::Mode>(
+    DcLeaderElection::Mode const mode = DcLeaderElection::ModeFromConfig(
         DcSettings::GetUInt(ObjectGuid::Empty, "LeaderElection"));
 
     // The MT designation lives on the member SLOT flags, not on the Player.

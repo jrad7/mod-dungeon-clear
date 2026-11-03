@@ -19,10 +19,20 @@ namespace DcLeaderElection
     {
         // Party: lowest GUID. Raid: the Main Tank flag, else highest gear score.
         DungeonClear = 0,
-        // mod-playerbots' main tank (PlayerbotAI::GetMainTankGuid): the Main
-        // Tank flag, else the first tank in group order.
+        // mod-playerbots' rule (PlayerbotAI::GetMainTankGuid): the Main Tank
+        // flag, else the first tank in group order, applied to the candidates.
+        // It names the same tank as playerbots whenever playerbots' main tank
+        // is a candidate; when that is a real player, a dead or off-map bot,
+        // the pick moves on to the first candidate.
         Playerbots = 1,
     };
+
+    // The conf value is read unclamped (a server-only key has no override
+    // path), so anything but 1 is the default rule rather than a third one.
+    inline Mode ModeFromConfig(std::uint32_t value)
+    {
+        return value == static_cast<std::uint32_t>(Mode::Playerbots) ? Mode::Playerbots : Mode::DungeonClear;
+    }
 
     // An alive tank bot on the reference's map, in group order.
     struct Candidate

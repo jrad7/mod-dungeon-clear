@@ -31,8 +31,9 @@ public:
     //   * 0: party, the lowest-GUID candidate; raid, the candidate flagged Main
     //     Tank (MEMBER_FLAG_MAINTANK), else the highest equipped gear score,
     //     GUID-tiebroken.
-    //   * 1: mod-playerbots' main tank — the flagged Main Tank, else the first
-    //     candidate in group order.
+    //   * 1: mod-playerbots' rule — the flagged Main Tank, else the first
+    //     candidate in group order (the same tank as GetMainTankGuid whenever
+    //     that one is a candidate).
     // Either way every member computes the same result (GetFirstMember walks the
     // whole raid, not just a sub-group), so they all agree on whom to follow.
     // Returns nullptr when no tank bot is present on the map. `reference` may be

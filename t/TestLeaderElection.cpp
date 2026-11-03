@@ -78,6 +78,14 @@ TEST(DcLeaderElectionTest, RunOwnerKeepsTheLead)
     EXPECT_EQ(Elect(c, false, Mode::DungeonClear), 2);
 }
 
+TEST(DcLeaderElectionTest, OutOfRangeConfigIsTheDefaultRule)
+{
+    EXPECT_EQ(DcLeaderElection::ModeFromConfig(0), Mode::DungeonClear);
+    EXPECT_EQ(DcLeaderElection::ModeFromConfig(1), Mode::Playerbots);
+    EXPECT_EQ(DcLeaderElection::ModeFromConfig(2), Mode::DungeonClear);
+    EXPECT_EQ(DcLeaderElection::ModeFromConfig(0xFFFFFFFFu), Mode::DungeonClear);
+}
+
 TEST(DcLeaderElectionTest, GearScoreOnlyNeededForDcRaids)
 {
     EXPECT_TRUE(DcLeaderElection::NeedsGearScore(Mode::DungeonClear, true));
