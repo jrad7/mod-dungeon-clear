@@ -363,6 +363,11 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
     // Raids carry several tanks across sub-groups and the player expects the one
     // they designated MT to drive; absent an MT, the best-geared tank is the most
     // survivable choice to hold threat for the whole raid.
+    //
+    // Both kinds: a tank that holds a run (its own DcRunState is enabled) wins
+    // over either rule. The run lives on the bot `dc on` reached, so a new
+    // election mid-run (gear score moves with every upgrade from loot) would
+    // hand the lead to a tank with no run, and nobody would drive.
     bool const isRaid = group->isRaidGroup();
 
     // The MT designation lives on the member SLOT flags, not on the Player, so it
@@ -382,6 +387,8 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
     }
 
     Player* leader = nullptr;
+    Player* mainTank = nullptr;
+    Player* runOwner = nullptr;
     uint32 bestGearScore = 0;
     for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
     {
@@ -399,6 +406,12 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
         if (!memberAI)
             continue;
 
+        if (DcRun::Of(memberAI).enabled)
+        {
+            runOwner = member;
+            break;
+        }
+
         if (!isRaid)
         {
             // Party: lowest GUID.
@@ -407,12 +420,12 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
             continue;
         }
 
-        // Raid: a flagged, eligible Main Tank bot wins immediately — no other
-        // candidate can outrank an explicit player designation.
+        // Raid: a flagged, eligible Main Tank bot outranks gear score — only a
+        // run owner further down the list can outrank an explicit designation.
         if (!mainTankGuid.IsEmpty() && member->GetGUID() == mainTankGuid)
         {
-            leader = member;
-            break;
+            mainTank = member;
+            continue;
         }
 
         // Otherwise rank by equipped gear score (GUID as the stable tiebreak so
@@ -425,6 +438,10 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
             bestGearScore = gearScore;
         }
     }
+    if (runOwner)
+        leader = runOwner;
+    else if (mainTank)
+        leader = mainTank;
 
     {
         std::lock_guard<std::mutex> lock(g_leaderCacheMutex);
