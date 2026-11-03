@@ -77,6 +77,26 @@
 
 DungeonClear.Enable = 1
 
+#
+#    DungeonClear.LeaderElection
+#        Which tank bot leads the run when the group has more than one. `.dc on`
+#        goes to that tank, and it keeps the lead while it lives until the run is
+#        switched off.
+#            0 = dungeon clear's own pick (default). A party takes the tank bot
+#                with the lowest GUID. A raid takes the bot marked Main Tank in
+#                the raid window, else the tank bot with the best gear.
+#            1 = the main tank as mod-playerbots picks it: the bot marked Main
+#                Tank, else the first tank bot in the group. With this the tank
+#                that leads the run is the one the playerbots raid strategies
+#                treat as main tank, and off tanks are the others.
+#        A real player marked Main Tank cannot lead the run; the pick then
+#        falls through to the next rule.
+#
+#        Default: 0
+#
+
+DungeonClear.LeaderElection = 0
+
 ########################################
 # GENERAL SETTINGS  (per-player overridable — see note above)
 ########################################
