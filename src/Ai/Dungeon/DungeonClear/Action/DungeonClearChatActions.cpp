@@ -340,8 +340,13 @@ bool DcOnAction::Execute(Event event)
         botAI->ChangeStrategy("+dungeon clear combat", BOT_STATE_COMBAT);
 
     // One run per group. A run can still sit on another tank that was dead when
-    // this `dc on` reached us; it would take the lead back on its rez, and a
-    // later `dc off` here would leave it running.
+    // this `dc on` reached us; it could take the lead back on its rez, and a
+    // later `dc off` here would leave it running. Only same-map members are
+    // reachable from this thread, so a run on a tank that released to the
+    // graveyard (PreventBotRelease = 0) is not cleared here.
+    //
+    // PickRunWing above latched the wing on that tank (it was still the run
+    // owner FindRunOwner returned), so the latch moves over with the run.
     if (Group* group = bot->GetGroup())
     {
         for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
@@ -350,8 +355,10 @@ bool DcOnAction::Execute(Event event)
             if (!member || member == bot || member->GetMap() != bot->GetMap())
                 continue;
             PlayerbotAI* memberAI = GET_PLAYERBOT_AI(member);
-            if (memberAI && DcRun::Of(memberAI).enabled)
-                DcActionShared::DisableDungeonClear(memberAI, "Dungeon clear moved to " + bot->GetName() + ".");
+            if (!memberAI || !DcRun::Of(memberAI).enabled)
+                continue;
+            DcRun::Of(context).runWing = DcRun::Of(memberAI).runWing;
+            DcActionShared::DisableDungeonClear(memberAI, "Dungeon clear moved to " + bot->GetName() + ".");
         }
     }
 

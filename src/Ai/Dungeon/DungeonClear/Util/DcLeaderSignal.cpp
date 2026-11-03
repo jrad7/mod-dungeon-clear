@@ -358,7 +358,8 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
     // A tank that holds a run (its own DcRunState is enabled) wins first. The run
     // lives on the bot `dc on` reached, so a new election mid-run (gear score
     // moves with every upgrade from loot) would hand the lead to a tank with no
-    // run, and nobody would drive. DcOnAction keeps it to one such tank.
+    // run, and nobody would drive. DcOnAction keeps it to one such tank on the
+    // map (a tank released to the graveyard is out of its reach).
     //
     // Otherwise the rule differs by group kind:
     //   * Party (5-man): lowest-GUID tank bot.
