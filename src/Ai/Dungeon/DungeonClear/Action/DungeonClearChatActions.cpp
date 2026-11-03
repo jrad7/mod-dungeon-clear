@@ -289,8 +289,9 @@ bool DcOnAction::Execute(Event event)
     // announces. The follower's follow-tank trigger self-activates off the
     // leader's enabled flag via DungeonClearPartyTankValue, so nothing else is
     // needed for them. Leadership (FindLeaderTank) resolves to exactly one tank
-    // bot — lowest-GUID in a party, the Main Tank / best-geared tank in a raid —
-    // so exactly one bot takes the path below even with several tanks present.
+    // bot — the tank already holding a run, else lowest-GUID in a party, the
+    // Main Tank / best-geared tank in a raid — so exactly one bot takes the path
+    // below even with several tanks present.
     if (!DcLeaderSignal::IsDungeonClearLeader(bot))
     {
         if (!botAI->HasStrategy("dungeon clear", BOT_STATE_NON_COMBAT))
@@ -337,6 +338,22 @@ bool DcOnAction::Execute(Event event)
         botAI->ChangeStrategy("+dungeon clear", BOT_STATE_NON_COMBAT);
     if (!botAI->HasStrategy("dungeon clear combat", BOT_STATE_COMBAT))
         botAI->ChangeStrategy("+dungeon clear combat", BOT_STATE_COMBAT);
+
+    // One run per group. A run can still sit on another tank that was dead when
+    // this `dc on` reached us; it would take the lead back on its rez, and a
+    // later `dc off` here would leave it running.
+    if (Group* group = bot->GetGroup())
+    {
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* member = ref->GetSource();
+            if (!member || member == bot || member->GetMap() != bot->GetMap())
+                continue;
+            PlayerbotAI* memberAI = GET_PLAYERBOT_AI(member);
+            if (memberAI && DcRun::Of(memberAI).enabled)
+                DcActionShared::DisableDungeonClear(memberAI, "Dungeon clear moved to " + bot->GetName() + ".");
+        }
+    }
 
     // Reset transient state and enable.
     DcRun::Of(context).enabled = true;

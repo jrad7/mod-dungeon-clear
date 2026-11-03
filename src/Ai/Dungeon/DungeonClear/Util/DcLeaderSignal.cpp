@@ -355,19 +355,19 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
     // every member of the group — including all raid sub-groups — so each member
     // sees the same candidate set and elects the same leader.
     //
-    // Election rule differs by group kind:
-    //   * Party (5-man): lowest-GUID tank bot — a deterministic, state-free pick.
-    //   * Raid: the bot flagged Main Tank (MEMBER_FLAG_MAINTANK) wins outright; if
-    //     none is flagged (or the flagged member isn't an eligible tank bot), the
-    //     eligible tank bot with the highest equipped gear score wins, GUID-tiebroken.
+    // A tank that holds a run (its own DcRunState is enabled) wins first. The run
+    // lives on the bot `dc on` reached, so a new election mid-run (gear score
+    // moves with every upgrade from loot) would hand the lead to a tank with no
+    // run, and nobody would drive. DcOnAction keeps it to one such tank.
+    //
+    // Otherwise the rule differs by group kind:
+    //   * Party (5-man): lowest-GUID tank bot.
+    //   * Raid: the bot flagged Main Tank (MEMBER_FLAG_MAINTANK); if none is
+    //     flagged (or the flagged member isn't an eligible tank bot), the
+    //     eligible tank bot with the highest equipped gear score, GUID-tiebroken.
     // Raids carry several tanks across sub-groups and the player expects the one
     // they designated MT to drive; absent an MT, the best-geared tank is the most
     // survivable choice to hold threat for the whole raid.
-    //
-    // Both kinds: a tank that holds a run (its own DcRunState is enabled) wins
-    // over either rule. The run lives on the bot `dc on` reached, so a new
-    // election mid-run (gear score moves with every upgrade from loot) would
-    // hand the lead to a tank with no run, and nobody would drive.
     bool const isRaid = group->isRaidGroup();
 
     // The MT designation lives on the member SLOT flags, not on the Player, so it
@@ -420,8 +420,8 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
             continue;
         }
 
-        // Raid: a flagged, eligible Main Tank bot outranks gear score — only a
-        // run owner further down the list can outrank an explicit designation.
+        // Raid: a flagged, eligible Main Tank bot outranks gear score. Keep
+        // scanning: a run owner anywhere in the list outranks it.
         if (!mainTankGuid.IsEmpty() && member->GetGUID() == mainTankGuid)
         {
             mainTank = member;
