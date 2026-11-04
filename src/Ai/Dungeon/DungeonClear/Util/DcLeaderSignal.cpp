@@ -355,11 +355,17 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
     // every member of the group — including all raid sub-groups — so each member
     // sees the same candidate set and elects the same leader.
     //
-    // Election rule differs by group kind:
-    //   * Party (5-man): lowest-GUID tank bot — a deterministic, state-free pick.
-    //   * Raid: the bot flagged Main Tank (MEMBER_FLAG_MAINTANK) wins outright; if
-    //     none is flagged (or the flagged member isn't an eligible tank bot), the
-    //     eligible tank bot with the highest equipped gear score wins, GUID-tiebroken.
+    // A tank that holds a run (its own DcRunState is enabled) wins first. The run
+    // lives on the bot `dc on` reached, so a new election mid-run (gear score
+    // moves with every upgrade from loot) would hand the lead to a tank with no
+    // run, and nobody would drive. DcOnAction keeps it to one such tank on the
+    // map (a tank released to the graveyard is out of its reach).
+    //
+    // Otherwise the rule differs by group kind:
+    //   * Party (5-man): lowest-GUID tank bot.
+    //   * Raid: the bot flagged Main Tank (MEMBER_FLAG_MAINTANK); if none is
+    //     flagged (or the flagged member isn't an eligible tank bot), the
+    //     eligible tank bot with the highest equipped gear score, GUID-tiebroken.
     // Raids carry several tanks across sub-groups and the player expects the one
     // they designated MT to drive; absent an MT, the best-geared tank is the most
     // survivable choice to hold threat for the whole raid.
@@ -382,6 +388,8 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
     }
 
     Player* leader = nullptr;
+    Player* mainTank = nullptr;
+    Player* runOwner = nullptr;
     uint32 bestGearScore = 0;
     for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
     {
@@ -399,6 +407,12 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
         if (!memberAI)
             continue;
 
+        if (DcRun::Of(memberAI).enabled)
+        {
+            runOwner = member;
+            break;
+        }
+
         if (!isRaid)
         {
             // Party: lowest GUID.
@@ -407,12 +421,12 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
             continue;
         }
 
-        // Raid: a flagged, eligible Main Tank bot wins immediately — no other
-        // candidate can outrank an explicit player designation.
+        // Raid: a flagged, eligible Main Tank bot outranks gear score. Keep
+        // scanning: a run owner anywhere in the list outranks it.
         if (!mainTankGuid.IsEmpty() && member->GetGUID() == mainTankGuid)
         {
-            leader = member;
-            break;
+            mainTank = member;
+            continue;
         }
 
         // Otherwise rank by equipped gear score (GUID as the stable tiebreak so
@@ -425,6 +439,10 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
             bestGearScore = gearScore;
         }
     }
+    if (runOwner)
+        leader = runOwner;
+    else if (mainTank)
+        leader = mainTank;
 
     {
         std::lock_guard<std::mutex> lock(g_leaderCacheMutex);

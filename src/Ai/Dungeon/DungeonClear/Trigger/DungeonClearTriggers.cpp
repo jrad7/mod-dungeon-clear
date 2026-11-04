@@ -81,9 +81,10 @@ namespace
     // trigger here goes inert so the tank holds exactly as it would under
     // `dc off`. See DcRunState (paused flag).
     //
-    // The driving ladder also runs ONLY on the elected leader. In a raid several
-    // tanks can have the flag set, but exactly one drives — the others follow it
-    // like any other member (see DungeonClearFollowTankTrigger). Only the leader
+    // The driving ladder also runs ONLY on the elected leader. A raid can have
+    // several tanks, but exactly one drives — the one holding the run (DcOnAction
+    // keeps one run per map) — and the others follow it like any other member
+    // (see DungeonClearFollowTankTrigger). Only the leader
     // ever reaches the leadership scan: followers don't set `enabled`, so they
     // short-circuit on the first check. See DcLeaderSignal::FindLeaderTank.
     bool IsEnabled(AiObjectContext* context, Player* bot)
