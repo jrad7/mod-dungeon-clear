@@ -8,6 +8,7 @@
 #include "DungeonClearUtil.h"   // DC_PULL_* log macros
 #include "DungeonClearMath.h"
 #include "DungeonClearTuning.h"
+#include "DcLeaderElection.h"
 #include "DcZoneLine.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
@@ -351,29 +352,17 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
             return cached;
     }
 
-    // Candidate set: alive tank BOTS on the reference's map. GetFirstMember walks
-    // every member of the group — including all raid sub-groups — so each member
-    // sees the same candidate set and elects the same leader.
-    //
-    // A tank that holds a run (its own DcRunState is enabled) wins first. The run
-    // lives on the bot `dc on` reached, so a new election mid-run (gear score
-    // moves with every upgrade from loot) would hand the lead to a tank with no
-    // run, and nobody would drive. DcOnAction keeps it to one such tank on the
-    // map (a tank released to the graveyard is out of its reach).
-    //
-    // Otherwise the rule differs by group kind:
-    //   * Party (5-man): lowest-GUID tank bot.
-    //   * Raid: the bot flagged Main Tank (MEMBER_FLAG_MAINTANK); if none is
-    //     flagged (or the flagged member isn't an eligible tank bot), the
-    //     eligible tank bot with the highest equipped gear score, GUID-tiebroken.
-    // Raids carry several tanks across sub-groups and the player expects the one
-    // they designated MT to drive; absent an MT, the best-geared tank is the most
-    // survivable choice to hold threat for the whole raid.
+    // Candidate set: alive tank BOTS on the reference's map, in group order.
+    // GetFirstMember walks every member of the group — including all raid
+    // sub-groups — so each member sees the same candidate set and elects the
+    // same leader. A real-player tank has no PlayerbotAI to run the clear, so it
+    // is never a candidate. The rule itself is DcLeaderElection::Elect; its
+    // run-owner rule relies on DcOnAction keeping one run per map.
     bool const isRaid = group->isRaidGroup();
+    DcLeaderElection::Mode const mode = DcLeaderElection::ModeFromConfig(
+        DcSettings::GetUInt(ObjectGuid::Empty, "LeaderElection"));
 
-    // The MT designation lives on the member SLOT flags, not on the Player, so it
-    // is read from the group's slot list (a real-player MT is resolved to a Player
-    // below and rejected like any non-bot tank, falling through to gear score).
+    // The MT designation lives on the member SLOT flags, not on the Player.
     ObjectGuid mainTankGuid;
     if (isRaid)
     {
@@ -387,10 +376,8 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
         }
     }
 
-    Player* leader = nullptr;
-    Player* mainTank = nullptr;
-    Player* runOwner = nullptr;
-    uint32 bestGearScore = 0;
+    std::vector<Player*> members;
+    std::vector<DcLeaderElection::Candidate> candidates;
     for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
     {
         Player* member = ref->GetSource();
@@ -401,48 +388,21 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
             continue;
         if (!PlayerbotAI::IsTank(member))
             continue;
-        // Only bot tanks can drive — a real-player tank has no PlayerbotAI to
-        // run the clear, so it can never be the leader.
         PlayerbotAI* memberAI = GET_PLAYERBOT_AI(member);
         if (!memberAI)
             continue;
 
-        if (DcRun::Of(memberAI).enabled)
-        {
-            runOwner = member;
-            break;
-        }
-
-        if (!isRaid)
-        {
-            // Party: lowest GUID.
-            if (!leader || member->GetGUID() < leader->GetGUID())
-                leader = member;
-            continue;
-        }
-
-        // Raid: a flagged, eligible Main Tank bot outranks gear score. Keep
-        // scanning: a run owner anywhere in the list outranks it.
-        if (!mainTankGuid.IsEmpty() && member->GetGUID() == mainTankGuid)
-        {
-            mainTank = member;
-            continue;
-        }
-
-        // Otherwise rank by equipped gear score (GUID as the stable tiebreak so
-        // every member still converges on the same leader).
-        uint32 const gearScore = memberAI->GetEquipGearScore(member);
-        if (!leader || gearScore > bestGearScore ||
-            (gearScore == bestGearScore && member->GetGUID() < leader->GetGUID()))
-        {
-            leader = member;
-            bestGearScore = gearScore;
-        }
+        DcLeaderElection::Candidate c;
+        c.guid = member->GetGUID().GetRawValue();
+        c.runOwner = DcRun::Of(memberAI).enabled;
+        c.mainTank = !mainTankGuid.IsEmpty() && member->GetGUID() == mainTankGuid;
+        if (DcLeaderElection::NeedsGearScore(mode, isRaid))
+            c.gearScore = memberAI->GetEquipGearScore(member);
+        members.push_back(member);
+        candidates.push_back(c);
     }
-    if (runOwner)
-        leader = runOwner;
-    else if (mainTank)
-        leader = mainTank;
+    int const elected = DcLeaderElection::Elect(candidates, isRaid, mode);
+    Player* leader = elected < 0 ? nullptr : members[elected];
 
     {
         std::lock_guard<std::mutex> lock(g_leaderCacheMutex);
