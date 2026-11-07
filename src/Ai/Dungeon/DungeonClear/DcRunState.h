@@ -229,6 +229,11 @@ struct DcRunState
     DcRunProgress::Mark progress;
     DcRunProgress::Mark purgeProgress;
 
+    // === final-loot hold (leader-owned) ===========================================
+    // getMSTime() the all-cleared trigger first held the run end for pending boss
+    // loot (0 = not holding). Capped by DcLootPolicy::kFinalLootWaitMs.
+    uint32 finalLootHoldSinceMs = 0;
+
     // === Blackwing Lair — Razorgore's orb and egg run (leader-owned) =============
     // The one encounter DC orchestrates from INSIDE a raid fight (see
     // DungeonEvent::encounterActive). All of it is the leader's; the runner GUID is

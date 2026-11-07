@@ -6,6 +6,7 @@
 #include "DcLootPolicy.h"
 
 #include "DcEncounterChests.h"
+#include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "DungeonClearMath.h"
 #include "DungeonClearTuning.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
@@ -357,4 +358,49 @@ bool DcLootPolicy::CorpseHasTakeableLoot(Player* bot, Creature* creature, uint32
     // (minQuality 0 == stock "loot everything"); once a floor is set, gold-only
     // corpses are skipped so the floor genuinely cuts the number of stops.
     return loot.gold > 0 && minQuality == 0;
+}
+
+std::string DcLootPolicy::DescribePendingBossLoot(Player* driver, std::vector<DungeonBossInfo> const& bosses)
+{
+    if (!driver)
+        return "";
+    Group* group = driver->GetGroup();
+    if (!group)
+        return "";
+
+    if (std::size_t const rolls = group->GetRolls().size())
+        return std::to_string(rolls) + " loot roll(s) still open";
+
+    Map* map = driver->GetMap();
+    if (!map)
+        return "";
+
+    std::unordered_set<uint32> bossEntries;
+    for (DungeonBossInfo const& info : bosses)
+        if (info.kind == DungeonAnchorKind::Boss && info.entry)
+            bossEntries.insert(info.entry);
+    if (bossEntries.empty())
+        return "";
+
+    ItemQualities const threshold = group->GetLootThreshold();
+    for (auto const& kv : map->GetCreatureBySpawnIdStore())
+    {
+        Creature* c = kv.second;
+        if (!c || c->IsAlive() || !bossEntries.count(c->GetEntry()))
+            continue;
+        if (!c->HasDynamicFlag(UNIT_DYNFLAG_LOOTABLE) || c->GetLootRecipientGroup() != group)
+            continue;
+        if (!c->IsWithinDist(driver, kPendingBossLootRange))
+            continue;
+        for (LootItem const& item : c->loot.items)
+        {
+            if (item.is_looted || item.freeforall || item.is_underthreshold)
+                continue;
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(item.itemid);
+            if (!proto || proto->Quality < uint32(threshold))
+                continue;
+            return c->GetName() + " has not been looted";
+        }
+    }
+    return "";
 }
