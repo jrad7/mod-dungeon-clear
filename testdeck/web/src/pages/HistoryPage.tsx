@@ -14,7 +14,7 @@ import type {
   RunDiag,
   RunRecord,
 } from "../api/types";
-import { classColorFor, QUALITY_CHOICES } from "../data/wow";
+import { classColorFor, QUALITY_CHOICES, QUALITY_COLOR } from "../data/wow";
 import {
   Card,
   ConfirmButton,
@@ -526,6 +526,36 @@ export function RunDetail({ r }: { r: RunRecord }) {
               {d.opponent
                 ? `${d.onBoss ? "" : "trash: "}${d.opponent}`
                 : "out of combat"}
+            </Line>
+          ))}
+        </Section>
+      )}
+
+      {r.loot && r.loot.length > 0 && (
+        <Section title={`Loot (${r.loot.length})`} note="rare and better">
+          {r.loot.map((l, i) => (
+            <Line key={i}>
+              <span className="font-mono text-ink-600">{fmtT(l.t)}</span>{" "}
+              <span
+                style={{ color: QUALITY_COLOR[l.quality ?? 0] }}
+                title={`${QUALITY_NAME[l.quality ?? 0] ?? "quality " + l.quality} · item ${l.itemId}`}
+              >
+                [{l.item}]
+              </span>
+              {(l.count ?? 1) > 1 ? ` x${l.count}` : ""} →{" "}
+              <PlayerName name={l.name} comp={r.comp} />{" "}
+              <span
+                className={`rounded px-1.5 py-0.5 text-xs ${
+                  l.roll === "need"
+                    ? "bg-emerald-900/50 text-emerald-300"
+                    : l.roll === "greed"
+                      ? "bg-amber-900/40 text-amber-300"
+                      : "bg-ink-800 text-ink-400"
+                }`}
+              >
+                {l.roll || "looted"}
+              </span>
+              {l.source ? <span className="text-ink-500"> · from {l.source}</span> : null}
             </Line>
           ))}
         </Section>

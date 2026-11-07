@@ -2381,6 +2381,8 @@ void DcTestRunJob::Finish(DcTestRun::Verdict verdict, std::string const& failRea
     {
         std::lock_guard<std::mutex> lock(_obsMutex);
         _record.disableReason = _disableReason;
+        _record.loot = std::move(_loot);
+        _loot.clear();
     }
     Teardown();
 }
@@ -2640,6 +2642,18 @@ void DcTestRunJob::OnRunDisabled(std::string const& reason)
     _disableFired = true;
     _disableReason = reason;
     _disableAllCleared = reason == DcActionShared::kReasonAllCleared;
+}
+
+void DcTestRunJob::OnLoot(DcTestRunRecord::LootEntry entry)
+{
+    if (_stage.load() != Stage::Monitoring)
+        return;
+    entry.t = _totalMs / 1000;
+    LOG_INFO("playerbots.dungeonclear", "TESTRUN {} loot: {} got {}x {} [{}] ({}) from {}", _record.runId,
+             entry.name, entry.count, entry.item, entry.itemId, entry.roll.empty() ? "looted" : entry.roll,
+             entry.source.empty() ? "?" : entry.source);
+    std::lock_guard<std::mutex> lock(_obsMutex);
+    _loot.push_back(std::move(entry));
 }
 
 void DcTestRunJob::OnStatusPayload(std::string const& payload)

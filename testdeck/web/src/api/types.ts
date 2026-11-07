@@ -224,6 +224,20 @@ export interface DeathEntry {
   onBoss?: boolean;
 }
 
+/* schema 14: one rare-or-better item a party member received. `roll` is
+ * "need" | "greed" for a won group-loot roll, "" for a direct pickup. */
+export interface LootEntry {
+  t?: number;
+  name?: string;
+  itemId?: number;
+  item?: string;
+  quality?: number;
+  count?: number;
+  roll?: string;
+  source?: string;
+  sourceEntry?: number;
+}
+
 export interface PullEntry {
   t?: number;
   entry?: number;
@@ -348,6 +362,7 @@ export interface RunRecord {
   bossRoster?: string[];
   bossTimeline?: BossKill[];
   deaths?: DeathEntry[];
+  loot?: LootEntry[];
   pulls?: PullEntry[];
   pullsElided?: number;
   statusTimeline?: TimelineEntry[];

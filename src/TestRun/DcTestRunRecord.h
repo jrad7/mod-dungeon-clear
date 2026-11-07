@@ -82,6 +82,25 @@ namespace DcTestRunRecord
         bool onBoss = false;       // opponent is a roster/flagged boss
     };
 
+    // One rare-or-better item a party member received during the run. Stamped
+    // from the core's loot hooks the moment the item lands in a bag: a won
+    // group-loot roll (roll = "need" | "greed") or a direct pickup off a corpse
+    // or chest (roll = "" — under master/free-for-all loot, or after everyone
+    // passed). A roll won into a full bag and mailed instead is not recorded
+    // (the core fires no hook for it).
+    struct LootEntry
+    {
+        std::uint32_t t = 0;          // seconds since run start
+        std::string name;             // who got it
+        std::uint32_t itemId = 0;
+        std::string item;             // item name
+        std::uint32_t quality = 0;    // ITEM_QUALITY_* (3 rare .. 5 legendary)
+        std::uint32_t count = 1;
+        std::string roll;             // "need" | "greed" | "" (looted directly)
+        std::string source;           // corpse/chest name; "" if unresolved
+        std::uint32_t sourceEntry = 0;
+    };
+
     // One pull the Dynamic governor took a verdict on, with what the classifier
     // PREDICTED would come and how many mobs actually turned up.
     //
@@ -144,7 +163,9 @@ namespace DcTestRunRecord
         //     running event filled — DcRunState::SetTestExtra). On a scenario
         //     run bossesTotal / bossRoster count the FOCUS only, so do not
         //     compare them with a full-dungeon run of the same map.
-        std::uint32_t schema = 13;
+        // 14: added loot (rare-or-better items received, and how: need/greed
+        //     roll or a direct pickup).
+        std::uint32_t schema = 14;
         std::string runId;
         std::string planId;       // owning `.dc test plan`, "" for ad-hoc runs
         std::string dungeon;      // registry token
@@ -185,6 +206,7 @@ namespace DcTestRunRecord
         std::vector<std::string> bossRoster;
         std::vector<BossKill> bossTimeline;
         std::vector<DeathEntry> deaths;
+        std::vector<LootEntry> loot;
         std::vector<PullEntry> pulls;
         // Pulls past kPullLog that were not kept. A run that re-pulls the same
         // pack forever is exactly the pathology worth seeing, so the overflow is

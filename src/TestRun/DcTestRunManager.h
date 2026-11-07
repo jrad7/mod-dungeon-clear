@@ -167,6 +167,11 @@ public:
     // routed to the job whose tank matches.
     void OnStatusPayload(ObjectGuid tank, std::string const& payload);
 
+    // Observer: the core's loot hooks report every rare-or-better item a player
+    // receives here; routed to the monitoring job whose party holds `looter`
+    // (no-op otherwise).
+    void OnLoot(Player* looter, DcTestRunRecord::LootEntry const& entry);
+
 private:
     DcTestRunManager() = default;
 

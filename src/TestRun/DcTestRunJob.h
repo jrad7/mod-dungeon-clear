@@ -177,6 +177,9 @@ public:
     // manager holds its registry lock across these calls).
     void OnRunDisabled(std::string const& reason);
     void OnStatusPayload(std::string const& payload);
+    // A rare-or-better item reached a member's bags (core loot hooks, map
+    // thread). Stamps `t` and queues it for the record; Monitoring only.
+    void OnLoot(DcTestRunRecord::LootEntry entry);
 
     ObjectGuid TankGuid() const { return _tankGuid; }
     ObjectGuid GmGuid() const { return _gmGuid; }
@@ -534,6 +537,7 @@ private:
     bool _disableAllCleared = false;
     std::string _disableReason;
     std::string _lastStatusState;
+    std::vector<DcTestRunRecord::LootEntry> _loot;
 };
 
 #endif  // _PLAYERBOT_DCTESTRUNJOB_H
