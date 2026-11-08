@@ -126,6 +126,7 @@ export interface LiveRun {
   bots?: BotPos[];
   recent?: TimelineEntry[];
   timeline?: TimelineEntry[];   // server-accumulated full history
+  loot?: LootEntry[];           // rare-or-better drops so far
 }
 
 /* ---- dungeon map pack (generated per host, see `testdeck mappack`) ---- */

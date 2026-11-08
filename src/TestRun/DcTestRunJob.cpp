@@ -748,6 +748,7 @@ DcTestRunLive::RunSnapshot DcTestRunJob::Snapshot() const
     std::size_t const from = st.size() > 8 ? st.size() - 8 : 0;
     for (std::size_t i = from; i < st.size(); ++i)
         s.recent.push_back({st[i].t, st[i].state, st[i].detail});
+    s.loot = _loot;
     return s;
 }
 

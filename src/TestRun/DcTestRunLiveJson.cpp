@@ -118,6 +118,22 @@ namespace DcTestRunLive
                 s << "{\"t\":" << e.t << ",\"state\":\"" << EscapeJson(e.state)
                   << "\",\"detail\":\"" << EscapeJson(e.detail) << "\"}";
             }
+            s << "],\"loot\":[";
+            for (std::size_t i = 0; i < run.loot.size(); ++i)
+            {
+                DcTestRunRecord::LootEntry const& l = run.loot[i];
+                if (i)
+                    s << ',';
+                s << "{\"t\":" << l.t
+                  << ",\"name\":\"" << EscapeJson(l.name) << '"'
+                  << ",\"itemId\":" << l.itemId
+                  << ",\"item\":\"" << EscapeJson(l.item) << '"'
+                  << ",\"quality\":" << l.quality
+                  << ",\"count\":" << l.count
+                  << ",\"roll\":\"" << EscapeJson(l.roll) << '"'
+                  << ",\"source\":\"" << EscapeJson(l.source) << '"'
+                  << ",\"sourceEntry\":" << l.sourceEntry << '}';
+            }
             s << "]}";
         }
         s << "]}";

@@ -326,3 +326,31 @@ TEST(DcTestRunLiveJsonTest, BotManaIsEmittedAndNonManaClassesReportMinusOne)
     EXPECT_NE(json.find("\"inCombat\":false,\"mp\":-1"), std::string::npos);
     EXPECT_NE(json.find("\"inCombat\":false,\"mp\":0"), std::string::npos);
 }
+
+// ---- loot so far ----------------------------------------------------------------
+// Same keys as the finished record's "loot" array, so the Test Deck renders both
+// with one component.
+
+TEST(DcTestRunLiveJsonTest, LootIsEmittedWithRecordKeys)
+{
+    RunSnapshot s = Sample("tr-1", "deadmines");
+    EXPECT_NE(Build(1700000000ull, {s}).find("\"loot\":[]"), std::string::npos);
+
+    DcTestRunRecord::LootEntry l;
+    l.t = 95;
+    l.name = "Bruggle";
+    l.itemId = 5193;
+    l.item = "Cape of the \"Brotherhood\"";
+    l.quality = 3;
+    l.roll = "need";
+    l.source = "Edwin VanCleef";
+    l.sourceEntry = 639;
+    s.loot.push_back(l);
+
+    std::string const json = Build(1700000000ull, {s});
+    EXPECT_NE(json.find("\"loot\":[{\"t\":95,\"name\":\"Bruggle\",\"itemId\":5193,"
+                        "\"item\":\"Cape of the \\\"Brotherhood\\\"\",\"quality\":3,\"count\":1,"
+                        "\"roll\":\"need\",\"source\":\"Edwin VanCleef\",\"sourceEntry\":639}]}"),
+              std::string::npos)
+        << json;
+}
