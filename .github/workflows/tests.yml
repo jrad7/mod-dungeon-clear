@@ -58,6 +58,22 @@ jobs:
         with:
           path: modules/mod-dungeon-clear
 
+      # Upstream AC #28020 (in the Playerbot core since 2026-10-31) calls
+      # std::exchange in MySQLConnection.cpp without including <utility>. PCH
+      # builds and libstdc++ 11 get it transitively; this NOPCH build picks up
+      # the runner's newer libstdc++, where nothing does. Self-retiring: once
+      # upstream adds the include, the guard skips and this step is a no-op.
+      - name: Patch upstream core (missing <utility>)
+        run: |
+          f=src/server/database/Database/MySQLConnection.cpp
+          if grep -q 'std::exchange' "$f" && ! grep -q '^#include <utility>' "$f"; then
+              sed -i '0,/^#include /s//#include <utility>\n&/' "$f"
+              grep -q '^#include <utility>' "$f" || { echo "::error file=$f::could not insert #include <utility>"; exit 1; }
+              echo "::warning file=$f::patched in missing #include <utility> (upstream AC #28020); drop this step once upstream has it"
+          else
+              echo "no patch needed"
+          fi
+
       # 2. Cheap, build-free gates first.
       - name: Determinism lint
         run: bash modules/mod-dungeon-clear/tools/check_determinism.sh
