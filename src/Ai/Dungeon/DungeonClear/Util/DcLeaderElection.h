@@ -25,9 +25,10 @@ namespace DcLeaderElection
     // The leader is mod-playerbots' main tank, so the playerbots raid strategies
     // and dungeon clear agree on who tanks first: the member GetMainTankGuid
     // names (the Main Tank flag, else the first living tank in group order).
-    // GetMainTankGuid can name a real player, or a member on another map, which
-    // dungeon clear cannot lead with; the first candidate, in the same group
-    // order, leads then.
+    // GetMainTankGuid can name a real player, a dead or non-tank member (a
+    // flagged Main Tank is not checked) or one on another map, which dungeon
+    // clear cannot lead with; the first candidate, in the same group order,
+    // leads then.
     //
     // A tank that holds a run wins over both: the run lives on the bot `dc on`
     // reached, and a new election mid-run would hand the lead to a tank with no

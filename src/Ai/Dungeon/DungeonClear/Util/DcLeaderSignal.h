@@ -31,7 +31,8 @@ public:
     // GetMainTankGuid: the member flagged Main Tank, else the first living tank
     // in group order) when that is a candidate, so the playerbots raid
     // strategies and dungeon clear agree on who tanks first; when it is not (a
-    // real player, or on another map) the first candidate in group order.
+    // real player, a dead or non-tank member, or one on another map) the first
+    // candidate in group order.
     // Every member computes the same result (GetFirstMember walks the
     // whole raid, not just a sub-group), so they all agree on whom to follow.
     // Returns nullptr when no tank bot is present on the map. `reference` may be
