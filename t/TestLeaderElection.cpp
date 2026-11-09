@@ -10,15 +10,12 @@
 
 using DcLeaderElection::Candidate;
 using DcLeaderElection::Elect;
-using DcLeaderElection::Mode;
 
 namespace
 {
-    Candidate Tank(std::uint64_t guid, std::uint32_t gearScore = 0, bool mainTank = false, bool runOwner = false)
+    Candidate Tank(bool mainTank = false, bool runOwner = false)
     {
         Candidate c;
-        c.guid = guid;
-        c.gearScore = gearScore;
         c.mainTank = mainTank;
         c.runOwner = runOwner;
         return c;
@@ -27,68 +24,41 @@ namespace
 
 TEST(DcLeaderElectionTest, NoCandidates)
 {
-    EXPECT_EQ(Elect({}, false, Mode::DungeonClear), -1);
-    EXPECT_EQ(Elect({}, true, Mode::Playerbots), -1);
+    EXPECT_EQ(Elect({}), -1);
 }
 
-TEST(DcLeaderElectionTest, PartyTakesLowestGuid)
+// No Main Tank flag and no candidate named by GetMainTankGuid's walk (a real
+// player or an off-map tank is first in the group): the first candidate leads.
+TEST(DcLeaderElectionTest, FirstInGroupOrderWithoutAMainTank)
 {
-    std::vector<Candidate> c{Tank(9), Tank(4), Tank(7)};
-    EXPECT_EQ(Elect(c, false, Mode::DungeonClear), 1);
+    std::vector<Candidate> c{Tank(), Tank(), Tank()};
+    EXPECT_EQ(Elect(c), 0);
 }
 
-TEST(DcLeaderElectionTest, RaidTakesBestGearThenLowestGuid)
+// GetMainTankGuid named this tank: the Main Tank flag, or the first living tank
+// in the group. It leads wherever it stands in the candidate list.
+TEST(DcLeaderElectionTest, PlayerbotsMainTankLeads)
 {
-    std::vector<Candidate> c{Tank(3, 64), Tank(5, 66), Tank(2, 66)};
-    EXPECT_EQ(Elect(c, true, Mode::DungeonClear), 2);
+    std::vector<Candidate> c{Tank(), Tank(), Tank(true)};
+    EXPECT_EQ(Elect(c), 2);
 }
 
-TEST(DcLeaderElectionTest, RaidMainTankBeatsGear)
-{
-    std::vector<Candidate> c{Tank(3, 70), Tank(5, 60, true)};
-    EXPECT_EQ(Elect(c, true, Mode::DungeonClear), 1);
-}
-
-TEST(DcLeaderElectionTest, PartyIgnoresMainTankFlag)
-{
-    std::vector<Candidate> c{Tank(3), Tank(5, 0, true)};
-    EXPECT_EQ(Elect(c, false, Mode::DungeonClear), 0);
-}
-
-TEST(DcLeaderElectionTest, PlayerbotsTakesFirstInGroupOrder)
-{
-    std::vector<Candidate> c{Tank(9, 60), Tank(4, 70), Tank(7, 80)};
-    EXPECT_EQ(Elect(c, true, Mode::Playerbots), 0);
-    EXPECT_EQ(Elect(c, false, Mode::Playerbots), 0);
-}
-
-TEST(DcLeaderElectionTest, PlayerbotsTakesMainTankInRaid)
-{
-    std::vector<Candidate> c{Tank(9), Tank(4), Tank(7, 0, true)};
-    EXPECT_EQ(Elect(c, true, Mode::Playerbots), 2);
-}
-
-// The run lives on the tank `dc on` reached. Out-geared, out-ranked or with a
-// Main Tank flagged after the start, it still leads.
+// The run lives on the tank `dc on` reached. A Main Tank flagged after the
+// start, or the first tank in the group, does not take it away.
 TEST(DcLeaderElectionTest, RunOwnerKeepsTheLead)
 {
-    std::vector<Candidate> c{Tank(3, 90, true), Tank(5, 95), Tank(8, 60, false, true)};
-    EXPECT_EQ(Elect(c, true, Mode::DungeonClear), 2);
-    EXPECT_EQ(Elect(c, true, Mode::Playerbots), 2);
-    EXPECT_EQ(Elect(c, false, Mode::DungeonClear), 2);
+    std::vector<Candidate> c{Tank(true), Tank(), Tank(false, true)};
+    EXPECT_EQ(Elect(c), 2);
 }
 
-TEST(DcLeaderElectionTest, OutOfRangeConfigIsTheDefaultRule)
+TEST(DcLeaderElectionTest, RunOwnerAndMainTankAreTheSameTank)
 {
-    EXPECT_EQ(DcLeaderElection::ModeFromConfig(0), Mode::DungeonClear);
-    EXPECT_EQ(DcLeaderElection::ModeFromConfig(1), Mode::Playerbots);
-    EXPECT_EQ(DcLeaderElection::ModeFromConfig(2), Mode::DungeonClear);
-    EXPECT_EQ(DcLeaderElection::ModeFromConfig(0xFFFFFFFFu), Mode::DungeonClear);
+    std::vector<Candidate> c{Tank(), Tank(true, true)};
+    EXPECT_EQ(Elect(c), 1);
 }
 
-TEST(DcLeaderElectionTest, GearScoreOnlyNeededForDcRaids)
+TEST(DcLeaderElectionTest, SingleTankLeads)
 {
-    EXPECT_TRUE(DcLeaderElection::NeedsGearScore(Mode::DungeonClear, true));
-    EXPECT_FALSE(DcLeaderElection::NeedsGearScore(Mode::DungeonClear, false));
-    EXPECT_FALSE(DcLeaderElection::NeedsGearScore(Mode::Playerbots, true));
+    std::vector<Candidate> c{Tank()};
+    EXPECT_EQ(Elect(c), 0);
 }

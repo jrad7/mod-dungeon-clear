@@ -358,23 +358,10 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
     // same leader. A real-player tank has no PlayerbotAI to run the clear, so it
     // is never a candidate. The rule itself is DcLeaderElection::Elect; its
     // run-owner rule relies on DcOnAction keeping one run per map.
-    bool const isRaid = group->isRaidGroup();
-    DcLeaderElection::Mode const mode = DcLeaderElection::ModeFromConfig(
-        DcSettings::GetUInt(ObjectGuid::Empty, "LeaderElection"));
-
-    // The MT designation lives on the member SLOT flags, not on the Player.
-    ObjectGuid mainTankGuid;
-    if (isRaid)
-    {
-        for (Group::MemberSlot const& slot : group->GetMemberSlots())
-        {
-            if (slot.flags & MEMBER_FLAG_MAINTANK)
-            {
-                mainTankGuid = slot.guid;
-                break;
-            }
-        }
-    }
+    //
+    // Which tank is the main tank is mod-playerbots' call, so ask it instead of
+    // keeping a second copy of its rule.
+    ObjectGuid const mainTankGuid = PlayerbotAI::GetMainTankGuid(group);
 
     std::vector<Player*> members;
     std::vector<DcLeaderElection::Candidate> candidates;
@@ -393,15 +380,12 @@ Player* DcLeaderSignal::FindLeaderTank(Player* reference)
             continue;
 
         DcLeaderElection::Candidate c;
-        c.guid = member->GetGUID().GetRawValue();
         c.runOwner = DcRun::Of(memberAI).enabled;
         c.mainTank = !mainTankGuid.IsEmpty() && member->GetGUID() == mainTankGuid;
-        if (DcLeaderElection::NeedsGearScore(mode, isRaid))
-            c.gearScore = memberAI->GetEquipGearScore(member);
         members.push_back(member);
         candidates.push_back(c);
     }
-    int const elected = DcLeaderElection::Elect(candidates, isRaid, mode);
+    int const elected = DcLeaderElection::Elect(candidates);
     Player* leader = elected < 0 ? nullptr : members[elected];
 
     {
