@@ -78,6 +78,7 @@ if (BUILD_TESTING)
             "${MOD_PATH}/t/TestCombatRegroup.cpp"
             "${MOD_PATH}/t/TestEscapeLeap.cpp"
             "${MOD_PATH}/t/TestSmartRest.cpp"
+            "${MOD_PATH}/t/TestLeaderElection.cpp"
             "${MOD_PATH}/t/TestPostCombatRez.cpp"
             "${MOD_PATH}/t/TestStrandedRecovery.cpp"
             "${MOD_PATH}/t/TestFightInPlace.cpp"
