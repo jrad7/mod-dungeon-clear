@@ -39,14 +39,29 @@ def raw_get(app, path, client=("192.168.1.50", 51000)):
     be exercised.
     """
     out = []
+    # Behave like a real server: deliver the (empty) body once, then block
+    # until the response is complete and only then report the disconnect.
+    # Starlette >= 1.10's BaseHTTPMiddleware keeps polling receive() for a
+    # disconnect and raises on a second http.request, so a receive() that
+    # replays the request forever is out of spec, not merely lazy.
+    state = {"body_sent": False, "done": None}
 
     async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        if not state["body_sent"]:
+            state["body_sent"] = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await state["done"].wait()
+        return {"type": "http.disconnect"}
 
     async def send(message):
         out.append(message)
+        if message["type"] == "http.response.body" and not message.get("more_body"):
+            state["done"].set()
 
     async def go():
+        # Created inside the running loop: on 3.9 an Event made outside one
+        # binds to a different loop than asyncio.run() starts.
+        state["done"] = asyncio.Event()
         await app({
             "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
             "method": "GET", "scheme": "http", "path": path,
@@ -658,10 +673,18 @@ def test_a_pre_account_id_token_is_refused(cfg):
     assert tdauth.parse_token(cfg, f"{body}.{tdauth._b64(sig)}") is None
 
 
-def test_throttle_does_not_grow_without_bound():
+def test_throttle_does_not_grow_without_bound(monkeypatch):
     """The map is keyed partly by attacker-chosen usernames and an
     unauthenticated request is enough to add one."""
+    from testdeck import auth as tdauth
     from testdeck.auth import LoginThrottle
+
+    # window_s=0 only expires a stamp once the clock has moved past it, and
+    # back-to-back time.time() calls return the same value most of the time —
+    # so on the real clock this was a race. A strictly increasing fake clock
+    # makes "expired by the next read" true every time.
+    ticks = iter(range(1, 10_000))
+    monkeypatch.setattr(tdauth.time, "time", lambda: float(next(ticks)))
 
     t = LoginThrottle(max_attempts=5, window_s=0)
     for i in range(500):

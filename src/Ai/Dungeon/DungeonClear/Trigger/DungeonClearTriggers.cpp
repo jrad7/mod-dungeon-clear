@@ -36,6 +36,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcHazard.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcLootPolicy.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcHazardRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcNoStopZone.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPartyState.h"
@@ -932,9 +933,42 @@ bool DungeonClearAllClearedTrigger::IsActive()
     if (bosses.empty())
         return false;
 
-    return !ownerCtx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)
-                ->Get()
-                .has_value();
+    DcRunState& rs = DcRun::Of(ownerCtx);
+    if (ownerCtx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get().has_value())
+    {
+        rs.finalLootHoldSinceMs = 0;
+        return false;
+    }
+
+    // Everything is down — but the last boss's drop may not have been rolled yet.
+    // Ending the run now tears it down before anyone opens the corpse, and the
+    // loot is lost. Hold while a roll is open or a boss corpse is unlooted, for
+    // at most kFinalLootWaitMs (a corpse nobody can loot must not hang the run).
+    uint32 const waitMs = DcLootPolicy::kFinalLootWaitMs;
+    std::string const pending = DcLootPolicy::DescribePendingBossLoot(bot, bosses);
+    if (pending.empty())
+    {
+        if (rs.finalLootHoldSinceMs)
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] all cleared: final loot dealt with after {}s -> ending run",
+                     bot->GetName(), getMSTimeDiff(rs.finalLootHoldSinceMs, getMSTime()) / IN_MILLISECONDS);
+        return true;
+    }
+    uint32 const now = getMSTime();
+    if (!rs.finalLootHoldSinceMs)
+    {
+        rs.finalLootHoldSinceMs = now ? now : 1u;
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] all cleared: holding run end for loot ({}), up to {}s",
+                 bot->GetName(), pending, waitMs / IN_MILLISECONDS);
+        return false;
+    }
+    if (getMSTimeDiff(rs.finalLootHoldSinceMs, now) < waitMs)
+        return false;
+    LOG_INFO("playerbots.dungeonclear",
+             "[DC:{}] all cleared: final loot still pending after {}s ({}) -> ending run anyway",
+             bot->GetName(), waitMs / IN_MILLISECONDS, pending);
+    return true;
 }
 
 bool DungeonClearRecoverStrandedTrigger::IsActive()

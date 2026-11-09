@@ -34,7 +34,10 @@ defaults:
 
 jobs:
   backend:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: once latest moved to 26.04, actions/setup-python
+    # had no 3.9 build for it and the floor job could not even install. 24.04
+    # still carries both matrix interpreters.
+    runs-on: ubuntu-24.04
     name: backend (py${{ matrix.python }})
     strategy:
       fail-fast: false

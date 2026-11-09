@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api/client";
 import DungeonMap from "../components/DungeonMap";
+import LootLine from "../components/LootLine";
 import { fmtDuration, usePoll } from "../api/hooks";
 import type {
   BotPos,
@@ -13,8 +14,9 @@ import type {
   Live,
   LivePlan,
   LiveRun,
+  LootEntry,
 } from "../api/types";
-import { ROLE_ORDER } from "../data/wow";
+import { CLASS_TEXT_COLOR, ROLE_ORDER } from "../data/wow";
 import {
   Card,
   ClassChip,
@@ -324,6 +326,10 @@ function RunCard({ run }: { run: LiveRun }) {
 
       {run.mapId ? <MapPanel mapId={run.mapId} bots={bots} /> : null}
 
+      {run.loot && run.loot.length > 0 && (
+        <LootPanel loot={run.loot} bots={bots} />
+      )}
+
       {run.timeline && run.timeline.length > 0 && (
         <TimelineFeed entries={run.timeline} startedS={run.elapsedS} />
       )}
@@ -368,6 +374,35 @@ function MapPanel({ mapId, bots }: { mapId: number; bots: BotPos[] }) {
         {open ? "▾" : "▸"} dungeon map
       </button>
       {open && <DungeonMap mapId={mapId} bots={bots} />}
+    </div>
+  );
+}
+
+/* Rare-or-better drops so far, collapsed like the map and timeline. Plain
+ * component state for the same reason as MapPanel. */
+function LootPanel({ loot, bots }: { loot: LootEntry[]; bots: BotPos[] }) {
+  const [open, setOpen] = useState(false);
+  const colorOf = (name?: string) => {
+    const b = bots.find((x) => x.name && x.name === name);
+    return b?.cls ? CLASS_TEXT_COLOR[b.cls] : undefined;
+  };
+
+  return (
+    <div className="mt-4">
+      <button
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="text-xs text-ink-500 hover:text-ink-300"
+      >
+        {open ? "▾" : "▸"} loot ({loot.length})
+      </button>
+      {open && (
+        <div className="mt-2 max-h-48 overflow-y-auto rounded-lg border border-ink-800 bg-ink-950/70 p-3">
+          {loot.map((l, i) => (
+            <LootLine key={i} l={l} nameColor={colorOf(l.name)} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }

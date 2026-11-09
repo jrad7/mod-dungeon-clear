@@ -126,6 +126,7 @@ export interface LiveRun {
   bots?: BotPos[];
   recent?: TimelineEntry[];
   timeline?: TimelineEntry[];   // server-accumulated full history
+  loot?: LootEntry[];           // rare-or-better drops so far
 }
 
 /* ---- dungeon map pack (generated per host, see `testdeck mappack`) ---- */
@@ -222,6 +223,20 @@ export interface DeathEntry {
   opponent?: string;
   opponentEntry?: number;
   onBoss?: boolean;
+}
+
+/* schema 14: one rare-or-better item a party member received. `roll` is
+ * "need" | "greed" for a won group-loot roll, "" for a direct pickup. */
+export interface LootEntry {
+  t?: number;
+  name?: string;
+  itemId?: number;
+  item?: string;
+  quality?: number;
+  count?: number;
+  roll?: string;
+  source?: string;
+  sourceEntry?: number;
 }
 
 export interface PullEntry {
@@ -348,6 +363,7 @@ export interface RunRecord {
   bossRoster?: string[];
   bossTimeline?: BossKill[];
   deaths?: DeathEntry[];
+  loot?: LootEntry[];
   pulls?: PullEntry[];
   pullsElided?: number;
   statusTimeline?: TimelineEntry[];

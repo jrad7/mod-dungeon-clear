@@ -57,7 +57,12 @@
 #include "CreatureAI.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
+#include "Group.h"
+#include "Item.h"
+#include "ItemTemplate.h"
+#include "LootMgr.h"
 #include "Log.h"
+#include "ObjectAccessor.h"
 #include "Player.h"
 #include "PlayerScript.h"
 #include "UnitScript.h"
@@ -329,6 +334,57 @@ public:
     {
         DcStrategyGate::Reconcile(player);
         DcStrategyGate::ApplyEntryDefaults(player);
+    }
+};
+
+// `.dc test` loot log: every rare-or-better item a test party member receives,
+// and how — a won need/greed roll, or a direct pickup. The manager routes it to
+// the monitoring run whose party holds the looter; a no-op for anyone else.
+class DungeonClearTestRunLootScript : public PlayerScript
+{
+public:
+    DungeonClearTestRunLootScript()
+        : PlayerScript("DungeonClearTestRunLootScript", {
+            PLAYERHOOK_ON_LOOT_ITEM,
+            PLAYERHOOK_ON_GROUP_ROLL_REWARD_ITEM
+        }) {}
+
+    void OnPlayerLootItem(Player* player, Item* item, uint32 count, ObjectGuid lootguid) override
+    {
+        Report(player, item, count, "", lootguid);
+    }
+
+    void OnPlayerGroupRollRewardItem(Player* player, Item* item, uint32 count, RollVote voteType,
+                                     Roll* roll) override
+    {
+        Loot* loot = roll ? roll->getLoot() : nullptr;
+        Report(player, item, count, voteType == NEED ? "need" : "greed",
+               loot ? loot->sourceWorldObjectGUID : ObjectGuid::Empty);
+    }
+
+private:
+    static void Report(Player* player, Item* item, uint32 count, char const* roll, ObjectGuid source)
+    {
+        if (!player || !item)
+            return;
+        ItemTemplate const* proto = item->GetTemplate();
+        if (!proto || proto->Quality < ITEM_QUALITY_RARE)
+            return;
+
+        DcTestRunRecord::LootEntry entry;
+        entry.name = player->GetName();
+        entry.itemId = proto->ItemId;
+        entry.item = proto->Name1;
+        entry.quality = proto->Quality;
+        entry.count = count;
+        entry.roll = roll;
+        if (!source.IsEmpty())
+        {
+            entry.sourceEntry = source.GetEntry();
+            if (WorldObject* obj = ObjectAccessor::GetWorldObject(*player, source))
+                entry.source = obj->GetName();
+        }
+        DcTestRunManager::Instance().OnLoot(player, entry);
     }
 };
 
@@ -847,6 +903,7 @@ void AddSC_dungeon_clear_module()
 {
     new DungeonClearRegistrarWorldScript();
     new DungeonClearLoginPlayerScript();
+    new DungeonClearTestRunLootScript();
     new DungeonClearPullBrakeScript();
     new DungeonClearLateJoinerScript();
     // Opening half only — the End script registers on the first world tick so

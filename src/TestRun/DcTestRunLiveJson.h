@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "TestRun/DcTestRunRecord.h"
+
 // Pure builder for the live-heartbeat sidecar the dashboard polls
 // (dc_testrun_live.json). With concurrent runs and plans the file carries:
 //
@@ -128,6 +130,9 @@ namespace DcTestRunLive
 
         std::vector<BotPos> bots;          // per-member positions (may be empty)
         std::vector<StatusEntry> recent;   // already trimmed to <=8 by the caller
+        // Every rare-or-better item looted so far, same shape as the finished
+        // record's "loot" array. Not trimmed: a run drops a handful at most.
+        std::vector<DcTestRunRecord::LootEntry> loot;
     };
 
     // tsS = unix seconds stamped by the caller (engine time source stays out of

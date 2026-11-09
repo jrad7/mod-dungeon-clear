@@ -8,9 +8,13 @@
 
 #include "Define.h"
 
+#include <string>
+#include <vector>
+
 class Player;
 class Creature;
 class PlayerbotAI;
+struct DungeonBossInfo;
 
 class DcLootPolicy
 {
@@ -131,6 +135,23 @@ public:
     // filled at death. Used by MaybeSkipUnworthyLoot; returns true (don't skip)
     // for anything it cannot positively classify.
     static bool CorpseHasTakeableLoot(Player* bot, Creature* creature, uint32 minQuality);
+
+    // Group loot from the run's last kills that the party has not dealt with
+    // yet, as a short human reason ("" = nothing pending). Two things count:
+    //   - an open group-loot roll in `driver`'s group (a boss item, or an
+    //     encounter chest's, still waiting on votes);
+    //   - a dead roster boss within kPendingBossLootRange of `driver`, tapped by
+    //     the group, still holding an unlooted at-or-above-threshold item —
+    //     nobody has opened the corpse, so the roll has not even started.
+    // The all-cleared trigger holds the run end on this so the final boss's
+    // drop is rolled and handed out before DisableDungeonClear tears the run
+    // down. Below-threshold junk, free-for-all items and gold never hold.
+    // The hold is capped at kFinalLootWaitMs: long enough for a bot to walk to
+    // the corpse and for the core's 60s group-roll timer to run out, short
+    // enough that a corpse nobody can loot does not hang the run.
+    static constexpr float kPendingBossLootRange = 100.0f;
+    static constexpr uint32 kFinalLootWaitMs = 60u * 1000u;
+    static std::string DescribePendingBossLoot(Player* driver, std::vector<DungeonBossInfo> const& bosses);
 
 };
 

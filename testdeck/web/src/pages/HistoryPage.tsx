@@ -15,6 +15,7 @@ import type {
   RunRecord,
 } from "../api/types";
 import { classColorFor, QUALITY_CHOICES } from "../data/wow";
+import LootLine from "../components/LootLine";
 import {
   Card,
   ConfirmButton,
@@ -527,6 +528,14 @@ export function RunDetail({ r }: { r: RunRecord }) {
                 ? `${d.onBoss ? "" : "trash: "}${d.opponent}`
                 : "out of combat"}
             </Line>
+          ))}
+        </Section>
+      )}
+
+      {r.loot && r.loot.length > 0 && (
+        <Section title={`Loot (${r.loot.length})`} note="rare and better">
+          {r.loot.map((l, i) => (
+            <LootLine key={i} l={l} nameColor={classColorFor(l.name, r.comp)} />
           ))}
         </Section>
       )}

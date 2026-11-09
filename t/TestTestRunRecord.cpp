@@ -165,6 +165,28 @@ TEST(DcTestRunRecordTest, DeathsAndRosterKeysArePresentWhenEmpty)
     EXPECT_NE(line.find("\"deaths\":[]"), std::string::npos);
 }
 
+TEST(DcTestRunRecordTest, LootSerializesWhoGotWhatAndHow)
+{
+    Record r = SampleRecord();
+    r.loot.push_back({512, "Bero", 32780, "Boots of the \"Crackling\" Flame", 3, 1, "need",
+                      "Anzu", 23035});
+    r.loot.push_back({530, "Olanne", 29434, "Badge of Justice", 4, 2, "", "", 0});
+
+    std::string const line = ToJsonl(r);
+    EXPECT_NE(line.find("\"loot\":[{\"t\":512,\"name\":\"Bero\",\"itemId\":32780,"
+                        "\"item\":\"Boots of the \\\"Crackling\\\" Flame\",\"quality\":3,"
+                        "\"count\":1,\"roll\":\"need\",\"source\":\"Anzu\",\"sourceEntry\":23035},"
+                        "{\"t\":530,\"name\":\"Olanne\",\"itemId\":29434,"
+                        "\"item\":\"Badge of Justice\",\"quality\":4,\"count\":2,"
+                        "\"roll\":\"\",\"source\":\"\",\"sourceEntry\":0}]"),
+              std::string::npos);
+}
+
+TEST(DcTestRunRecordTest, LootKeyIsPresentWhenEmpty)
+{
+    EXPECT_NE(ToJsonl(SampleRecord()).find("\"loot\":[]"), std::string::npos);
+}
+
 TEST(DcTestRunRecordTest, BossRosterSerializesInProgressionOrder)
 {
     Record r = SampleRecord();
@@ -177,13 +199,14 @@ TEST(DcTestRunRecordTest, BossRosterSerializesInProgressionOrder)
               std::string::npos);
 }
 
-TEST(DcTestRunRecordTest, SchemaIsThirteen)
+TEST(DcTestRunRecordTest, SchemaIsFourteen)
 {
     // 12: added combatHolders[].trigger, and with it a change of meaning in the
     // sibling `legitimate` field — a trigger creature now sinks the verdict.
     // 13: added the scenario block (scenario/scenarioOf/focus/successBy/
     // tailPending/extras).
-    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":13"), std::string::npos);
+    // 14: added loot.
+    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":14"), std::string::npos);
     EXPECT_NE(ToJsonl(SampleRecord()).find("\"size\":"), std::string::npos);
 }
 

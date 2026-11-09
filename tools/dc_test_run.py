@@ -4,8 +4,8 @@ dc_test_run.py — everything known about one test run, by its id.
 
 `.dc test` scatters a single run's evidence across five places:
 
-  dc_testruns.jsonl        the finished-run record (schema v7-v13): comp, result,
-                           fail reason, boss timeline, deaths, pulls, status
+  dc_testruns.jsonl        the finished-run record (schema v7-v14): comp, result,
+                           fail reason, boss timeline, deaths, loot, pulls, status
                            timeline, pauses, watchdog config, and the teardown
                            DcDiag snapshot
   dc_testplans.jsonl       the campaign the run belonged to, and its siblings
@@ -695,6 +695,23 @@ def render_deaths(rec):
              d.get("opponentEntry", ""), "ON BOSS" if d.get("onBoss") else ""]
             for d in deaths]
     return table(rows, ["at", "who", "killed by", "entry", ""])
+
+
+QUALITY_NAMES = {3: "rare", 4: "epic", 5: "legendary", 6: "artifact", 7: "heirloom"}
+
+
+def render_loot(rec):
+    if "loot" not in rec:
+        return ["  (not recorded: pre-schema-14 record)"]
+    loot = rec.get("loot") or []
+    if not loot:
+        return ["  (no rare-or-better items)"]
+    rows = [[mmss(l.get("t")), l.get("name", "?"),
+             l.get("item", "?") + (f" x{l['count']}" if (l.get("count") or 1) > 1 else ""),
+             QUALITY_NAMES.get(l.get("quality"), l.get("quality", "")),
+             l.get("roll") or "looted", l.get("source") or "?"]
+            for l in loot]
+    return table(rows, ["at", "who", "item", "quality", "how", "from"])
 
 
 def render_pulls(rec):
@@ -1570,6 +1587,7 @@ def main():
     if extras:
         print(hr("EVENT EXTRAS"));  print("\n".join(extras))
     print(hr("DEATHS"));           print("\n".join(render_deaths(rec)))
+    print(hr("LOOT"));             print("\n".join(render_loot(rec)))
     print(hr("PULLS"));            print("\n".join(render_pulls(rec)))
     print(hr("STATUS TIMELINE"));  print("\n".join(render_status_timeline(rec, live_rec, args.timeline)))
     print(hr("PAUSES"));           print("\n".join(render_pauses(rec)))
