@@ -363,11 +363,20 @@ namespace DungeonClearMath
     // sticky, the walk carries that mob out of the band, the trigger drops, Advance
     // climbs back, and it repeats (tr-20260927-201144-5, Karazhan ramp to
     // Terestian: a Mana Feeder 90yd back vs an Arcane Protector patrolling ahead).
-    // Returns true to drop the sticky for the fresh pick: a different fresh pick
-    // exists, the sticky is out of combat, and the sticky is more than `margin`
-    // farther away than the fresh pick.
+    // Returns true to drop the sticky for the fresh pick when a different fresh
+    // pick exists and the sticky is out of combat, and either:
+    //  - the sticky is outside the corridor band the fresh pick came from
+    //    (`stickyInBand` false). Distance cannot see this case: on the Karazhan
+    //    opera balcony ramp (tr-20261114-113223-1) the sticky was a Skeletal Usher on
+    //    the floor below, NEARER than the balcony Patron the trigger named, so the
+    //    margin never fired, and each walk-in dragged the tank down the ramp
+    //    until the off-line rejoin struck out. Or
+    //  - the sticky is more than `margin` farther away than the fresh pick (the
+    //    fallback when band membership is unknown: pass `stickyInBand` true).
+    // Two in-band corridor mobs at comparable range keep the sticky: no flip-flop.
     bool ShouldDropTrashSticky(bool haveFresh, bool freshIsSticky, bool stickyInCombat,
-                               float stickyDist, float freshDist, float margin);
+                               bool stickyInBand, float stickyDist, float freshDist,
+                               float margin);
 
     // Orphaned-pull release gate (pure). The effective pull mode can be forced
     // OFF while a pull is still standing — a PERSISTENT anchored event takes the

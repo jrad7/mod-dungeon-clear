@@ -589,26 +589,37 @@ using DungeonClearMath::ShouldDropTrashSticky;
 // patrolling 22-38yd ahead. The walk-back loop ends by retargeting.
 TEST(DungeonClearTrashStickyTest, DropsAStickyFarBehindTheFreshPick)
 {
-    EXPECT_TRUE(ShouldDropTrashSticky(true, false, false, 90.0f, 30.0f, 15.0f));
+    EXPECT_TRUE(ShouldDropTrashSticky(true, false, false, true, 90.0f, 30.0f, 15.0f));
 }
 
 // Two roughly equidistant corridor mobs: keep the sticky, no flip-flop.
 TEST(DungeonClearTrashStickyTest, KeepsTheStickyAgainstAComparablePick)
 {
-    EXPECT_FALSE(ShouldDropTrashSticky(true, false, false, 30.0f, 22.0f, 15.0f));
-    EXPECT_FALSE(ShouldDropTrashSticky(true, false, false, 45.0f, 30.0f, 15.0f));
+    EXPECT_FALSE(ShouldDropTrashSticky(true, false, false, true, 30.0f, 22.0f, 15.0f));
+    EXPECT_FALSE(ShouldDropTrashSticky(true, false, false, true, 45.0f, 30.0f, 15.0f));
 }
 
-// A sticky already fighting the party is never abandoned.
+// tr-20261114-113223-1: the sticky Usher on the opera floor (~44yd) is NEARER than
+// the balcony Patron the trigger names (52-58yd), so the margin never fires, but the
+// corridor scan rejects it. Out of band means stale, whatever the distance.
+TEST(DungeonClearTrashStickyTest, DropsAnOutOfBandStickyEvenWhenNearer)
+{
+    EXPECT_TRUE(ShouldDropTrashSticky(true, false, false, false, 44.0f, 57.0f, 15.0f));
+    EXPECT_TRUE(ShouldDropTrashSticky(true, false, false, false, 30.0f, 22.0f, 15.0f));
+}
+
+// A sticky already fighting the party is never abandoned, in band or out.
 TEST(DungeonClearTrashStickyTest, KeepsAStickyInCombat)
 {
-    EXPECT_FALSE(ShouldDropTrashSticky(true, false, true, 90.0f, 30.0f, 15.0f));
+    EXPECT_FALSE(ShouldDropTrashSticky(true, false, true, true, 90.0f, 30.0f, 15.0f));
+    EXPECT_FALSE(ShouldDropTrashSticky(true, false, true, false, 44.0f, 57.0f, 15.0f));
 }
 
 TEST(DungeonClearTrashStickyTest, KeepsTheStickyWithNoOtherPick)
 {
-    EXPECT_FALSE(ShouldDropTrashSticky(false, false, false, 90.0f, 0.0f, 15.0f));
-    EXPECT_FALSE(ShouldDropTrashSticky(true, true, false, 90.0f, 90.0f, 15.0f));
+    EXPECT_FALSE(ShouldDropTrashSticky(false, false, false, true, 90.0f, 0.0f, 15.0f));
+    EXPECT_FALSE(ShouldDropTrashSticky(false, false, false, false, 90.0f, 0.0f, 15.0f));
+    EXPECT_FALSE(ShouldDropTrashSticky(true, true, false, false, 90.0f, 90.0f, 15.0f));
 }
 
 // ---------------------------------------------------------------------------

@@ -231,11 +231,15 @@ bool DungeonClearMath::ShouldTagBossFromStandoff(bool walkRefused, bool botMovin
 }
 
 bool DungeonClearMath::ShouldDropTrashSticky(bool haveFresh, bool freshIsSticky,
-                                             bool stickyInCombat, float stickyDist,
-                                             float freshDist, float margin)
+                                             bool stickyInCombat, bool stickyInBand,
+                                             float stickyDist, float freshDist, float margin)
 {
     if (!haveFresh || freshIsSticky || stickyInCombat)
         return false;
+    // Out of the band the trigger fires on: nothing will ever fire for the sticky
+    // again, so walking to it only drags the tank off the route, however near it is.
+    if (!stickyInBand)
+        return true;
     return stickyDist > freshDist + margin;
 }
 
