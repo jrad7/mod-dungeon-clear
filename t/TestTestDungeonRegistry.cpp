@@ -274,7 +274,7 @@ namespace
             { "kara", "Karazhan", 532, -11100.00f, -2003.98f, 49.89f, 0.577f, 70, "" },
             { "gruul", "Gruul's Lair", 565, 62.78f, 35.46f, -3.98f, 1.418f, 70, "" },
             { "kara-chess", "Karazhan: Chess", 532, -11109.8f, -1852.8f, 221.1f, 0.f, 70, "", 0,
-              "kara", {22520}, InstanceDataEquals(9, 3), 60, 1800, 300 },
+              "kara", {22520}, InstanceDataEquals(8, 3), 60, 1800, 300 },
         };
     }
 
@@ -380,11 +380,11 @@ TEST(DcTestDungeonRegistryTest, NumericLookupIgnoresScenarios)
 
 TEST(DcTestDungeonRegistryTest, InstanceDataPredicate)
 {
-    SuccessPredicate const p = InstanceDataEquals(9, 3);
+    SuccessPredicate const p = InstanceDataEquals(8, 3);
     EXPECT_TRUE(p.IsSet());
     EXPECT_TRUE(PredicateHolds(p, 3));
     EXPECT_FALSE(PredicateHolds(p, 1));
-    EXPECT_EQ(DcTestDungeonRegistry::DescribePredicate(p), "instanceData(9)==3");
+    EXPECT_EQ(DcTestDungeonRegistry::DescribePredicate(p), "instanceData(8)==3");
 
     // An unset predicate never holds — it means "wait for all-cleared".
     SuccessPredicate const none;
@@ -398,7 +398,7 @@ TEST(DcTestDungeonRegistryTest, ScenarioSidecarShape)
     // The fragment the Test Deck's catalogue parses (GET /api/testdungeons).
     EXPECT_EQ(ScenarioSidecarFields(ChessRow()),
               ",\"scenario\":true,\"scenarioOf\":\"kara\",\"focus\":[22520],"
-              "\"success\":\"instanceData(9)==3\",\"successGraceS\":60,"
+              "\"success\":\"instanceData(8)==3\",\"successGraceS\":60,"
               "\"overallTimeoutS\":1800,\"noProgressS\":300");
     // A plain row adds nothing, so its sidecar object is byte-identical to
     // what it was before scenarios existed.

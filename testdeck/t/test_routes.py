@@ -39,7 +39,7 @@ CATALOGUE = {
         {"token": "kara-chess", "name": "Karazhan: Chess", "mapId": 532,
          "level": 70, "heroicLevel": 0, "wing": "",
          "scenario": True, "scenarioOf": "kara", "focus": [22520],
-         "success": "instanceData(9)==3", "successGraceS": 60,
+         "success": "instanceData(8)==3", "successGraceS": 60,
          "overallTimeoutS": 1800, "noProgressS": 300,
          "raid": True, "sizeMin": 2, "sizeMax": 10,
          "sizePresets": [10], "defaultSize": 10,

@@ -5626,9 +5626,12 @@ void RegisterOculusEvents(std::vector<DungeonEvent>& out);
 // Karazhan (map 532) — the numbers the roster, the event rows, the hooks and the
 // gtests share. The reasoning is in KarazhanEvents.cpp.
 //
-// TWO INDEX SPACES, and they disagree. `BIT_*` are DungeonEncounter.dbc bits (the
-// completion mask). `STATE_*` are karazhan.h DATA_* boss-state slots, which only
-// GetBossState reads. Opera is bit 3 but slot 4; Nightbane is bit 10 but slot 11.
+// TWO INDEX SPACES. `BIT_*` are DungeonEncounter.dbc bits (the completion mask).
+// `STATE_*` are karazhan.h DATA_* boss-state slots, which only GetBossState reads.
+// Since AC #28315 the slots follow DBC order (map 532 entries 652-662, index
+// 0-10), so the two now agree; before it the Servant's Quarters rare held slot 3
+// and Opera was slot 4, Nightbane slot 11. The two names stay separate because
+// they are still read through different APIs.
 namespace DcKarazhan
 {
     constexpr uint32 MAP = 532;
@@ -5653,8 +5656,8 @@ namespace DcKarazhan
 
     // karazhan.h boss-state slots.
     constexpr int32 STATE_MOROES    = 1;
-    constexpr int32 STATE_OPERA     = 4;
-    constexpr int32 STATE_NIGHTBANE = 11;
+    constexpr int32 STATE_OPERA     = 3;
+    constexpr int32 STATE_NIGHTBANE = 10;
 
     // Clear order. Nightbane sits after Opera: the stage-to-terrace leg is the
     // cheapest place to fit the urn (+249yd of navmesh walking against +693 for
@@ -5702,6 +5705,15 @@ namespace DcKarazhan
     constexpr uint32 GO_BLACKENED_URN = 194092;
     // mod-individual-progression's go_blackened_urn refuses a clicker without it.
     constexpr uint32 ITEM_BLACKENED_URN = 24140;
+    // boss_nightbane's ACTION_START_INTRO: what go_blackened_urn sends him.
+    constexpr int32 NB_ACTION_START_INTRO = 0;
+    constexpr uint32 HOOK_KZ_NIGHTBANE_INTRO = 66;
+
+    // His spawn perch, where he sits until the intro starts and where he
+    // respawns after an evade.
+    constexpr float NB_PERCH_X = -11003.7f, NB_PERCH_Y = -1760.19f, NB_PERCH_Z = 140.253f;
+    // Farther than this from the perch, he is already flying.
+    constexpr float NB_PERCH_RADIUS = 3.0f;
 
     // Where the intro path puts him down on the Master's Terrace.
     constexpr float LANDING_X = -11142.7f, LANDING_Y = -1891.2f, LANDING_Z = 92.3f;
@@ -5732,7 +5744,7 @@ namespace DcKarazhan
 
     // karazhan.h instance data. NOT boss-state slots: the script never calls
     // SetBossState for chess, and none of it is saved.
-    constexpr uint32 DATA_CHESS_EVENT      = 9;   // NOT_STARTED 0 / IN_PROGRESS 1 / DONE 3 / SPECIAL 4
+    constexpr uint32 DATA_CHESS_EVENT      = 8;   // NOT_STARTED 0 / IN_PROGRESS 1 / DONE 3 / SPECIAL 4
     constexpr uint32 DATA_CHESS_TEAM       = 33;  // TeamId of the player who started it
     constexpr uint32 DATA_CHESS_GAME_PHASE = 35;
     constexpr uint32 CHESS_EVENT_DONE = 3;

@@ -229,7 +229,7 @@ TEST(DcTestRunRecordTest, ScenarioBlockAndExtrasSerialize)
     r.scenario = "kara-chess";
     r.scenarioOf = "kara";
     r.focus = {22520};
-    r.successPredicate = "instanceData(9)==3";
+    r.successPredicate = "instanceData(8)==3";
     r.successBy = "grace";
     r.tailPending = true;
     r.extras.push_back({"attempts", "2", true});
@@ -240,7 +240,7 @@ TEST(DcTestRunRecordTest, ScenarioBlockAndExtrasSerialize)
 
     std::string const line = ToJsonl(r);
     EXPECT_NE(line.find("\"scenario\":\"kara-chess\",\"scenarioOf\":\"kara\","
-                        "\"focus\":[22520],\"successPredicate\":\"instanceData(9)==3\","
+                        "\"focus\":[22520],\"successPredicate\":\"instanceData(8)==3\","
                         "\"successBy\":\"grace\",\"tailPending\":true,"
                         "\"extras\":{\"attempts\":2,\"material\":\"12v9\","
                         "\"looted\":\"yes \\\"maybe\\\"\",\"bogus\":\"12abc\"}"),

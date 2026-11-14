@@ -260,7 +260,7 @@ TEST(DcKarazhanTest, NightbaneUrnObjectiveOwnsTheEncounter)
     EXPECT_EQ(urn->kind, DungeonAnchorKind::Objective);
     EXPECT_EQ(urn->eventId, EV_NIGHTBANE);
     EXPECT_EQ(BossOrderKey(*urn), static_cast<uint32>(ORDER_NIGHTBANE_URN));
-    // Completion is the boss-state slot (11), not the DBC bit (10).
+    // Completion is the boss-state slot (10, the DBC order since AC #28315).
     EXPECT_EQ(urn->doneBossStateIndex, STATE_NIGHTBANE);
 
     // Step 0 clicks the urn, and the at-objective trigger only holds for step 0
@@ -285,25 +285,31 @@ TEST(DcKarazhanTest, NightbaneEventShape)
     EXPECT_EQ(ev->activation, EventActivation::Anchored);
     EXPECT_TRUE(ev->persistent);
     EXPECT_TRUE(ev->required);
-    ASSERT_EQ(ev->steps.size(), 4u);
+    ASSERT_EQ(ev->steps.size(), 5u);
 
-    // The urn is clicked first: nothing is summoned until it is. The party tops
-    // off while he flies the intro.
+    // The urn is clicked first: nothing is summoned until it is. Then the intro
+    // is started by hand if the urn script did not (mod-individual-progression's
+    // copy looks him up by his pre-#28315 slot). The party tops off while he
+    // flies the intro.
     EXPECT_EQ(ev->steps[0].kind, EventStepKind::UseGameObject);
     EXPECT_EQ(ev->steps[0].goEntry, GO_BLACKENED_URN);
     EXPECT_EQ(ev->steps[1].kind, EventStepKind::Custom);
-    EXPECT_EQ(ev->steps[1].hookId, DC_HOOK_RAID_MUSTER);
+    EXPECT_EQ(ev->steps[1].hookId, HOOK_KZ_NIGHTBANE_INTRO);
+    EXPECT_TRUE(ObjectiveHookRegistry::Has(HOOK_KZ_NIGHTBANE_INTRO));
+    EXPECT_GT(ev->steps[1].timeoutMs, 0u);
+    EXPECT_EQ(ev->steps[2].kind, EventStepKind::Custom);
+    EXPECT_EQ(ev->steps[2].hookId, DC_HOOK_RAID_MUSTER);
 
     // The intro wait clears on IN_PROGRESS or DONE and never rewinds (NOT_STARTED
     // is the state it is waiting OUT of).
-    EventStep const& intro = ev->steps[2];
+    EventStep const& intro = ev->steps[3];
     EXPECT_EQ(intro.bossStateId, STATE_NIGHTBANE);
     EXPECT_TRUE(intro.bossStateClearMask & DcBossStateBit(1));
     EXPECT_TRUE(intro.bossStateClearMask & DcBossStateBit(3));
     EXPECT_EQ(intro.restartOnBossStateMask, 0u);
 
     // The fight hold clears on DONE and rewinds on an evade.
-    EventStep const& fight = ev->steps[3];
+    EventStep const& fight = ev->steps[4];
     EXPECT_EQ(fight.bossStateId, STATE_NIGHTBANE);
     EXPECT_EQ(DecideBossStateGate(3, fight.bossStateClearMask, fight.restartOnBossStateMask),
               BossStateGateVerdict::Clear);
@@ -329,7 +335,7 @@ TEST(DcKarazhanTest, OperaObjectiveReplacesBarnes)
     EXPECT_EQ(opera->kind, DungeonAnchorKind::Objective);
     EXPECT_EQ(opera->eventId, EV_OPERA);
     EXPECT_EQ(BossOrderKey(*opera), static_cast<uint32>(ORDER_OPERA));
-    // Completion is the Opera slot (4), not the DBC bit (3).
+    // Completion is the Opera slot (3, the DBC order since AC #28315).
     EXPECT_EQ(opera->doneBossStateIndex, STATE_OPERA);
     // Barnes is never a boss anchor: the tank would attack a friendly NPC.
     EXPECT_EQ(FindEntry(out, NPC_BARNES), nullptr);

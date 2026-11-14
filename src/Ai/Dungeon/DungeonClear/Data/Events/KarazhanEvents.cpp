@@ -10,6 +10,8 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcKaraLibraryPit.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
+#include "Creature.h"
+#include "CreatureAI.h"
 #include "InstanceScript.h"
 #include "Log.h"
 #include "Player.h"
@@ -143,12 +145,14 @@ namespace
     // clear only starts the event once the tank is in click range:
     //
     //   0. click the urn;
-    //   1. raid muster: stage on the tank, top off, rebuff, while he flies the
+    //   1. make sure the intro started (EnsureNightbaneIntro): start it
+    //      ourselves if the urn script did not;
+    //   2. raid muster: stage on the tank, top off, rebuff, while he flies the
     //      intro path (~765yd, about a minute). The terrace doors shut when the
     //      fight starts, so everyone must be out here first;
-    //   2. hold at the muster point (18.8yd from the landing) until the fight is
+    //   3. hold at the muster point (18.8yd from the landing) until the fight is
     //      on — this is what stops the 8s no-player evade;
-    //   3. hold until DONE. The fight is combat, which the playerbots `karazhan`
+    //   4. hold until DONE. The fight is combat, which the playerbots `karazhan`
     //      strategy owns (flight phases, teleport back to the terrace). An evade
     //      reads NOT_STARTED here and rewinds to step 0, which clicks again.
     DungeonEvent NightbaneUrn()
@@ -159,6 +163,8 @@ namespace
             .UseGO(GO_BLACKENED_URN, /*searchRadius*/ 30.0f, URN_X, URN_Y, URN_Z)
                 .CarryItem(ITEM_BLACKENED_URN)
                 .Timeout(60000)
+            .Custom(HOOK_KZ_NIGHTBANE_INTRO)
+                .Timeout(120000)  // an evading Nightbane flies home and respawns first
             .Custom(DC_HOOK_RAID_MUSTER)
                 .Timeout(240000)
             .MoveToHoldUntilBossState(NB_MUSTER_X, NB_MUSTER_Y, NB_MUSTER_Z, /*radius*/ 8.0f,
@@ -254,6 +260,46 @@ namespace
         return ObjectiveArriveResult::Done;
     }
 
+    // Step 1 of the Nightbane event, right after the urn click. The click does
+    // not always start him: mod-individual-progression replaces go_blackened_urn
+    // with a copy that looks him up by a hardcoded DATA_NIGHTBANE = 11, and since
+    // AC #28315 his slot is 10, so that click finds nobody and does nothing.
+    //
+    // So this does what the core urn script does: if his slot is NOT_STARTED and
+    // he is alive and still on his perch, send ACTION_START_INTRO. GameObject::Use
+    // runs the urn script at once, so a click that worked has already moved him
+    // off the perch (or set IGNORE_PATHFINDING) by the time this runs, and he is
+    // left alone; a second DoAction would restart his take-off.
+    //
+    // An evading Nightbane is flying home to despawn and respawn on the perch.
+    // Wait for the fresh one rather than start the intro mid-evade.
+    ObjectiveArriveResult EnsureNightbaneIntro(Player* bot, AiObjectContext* /*context*/,
+                                               DungeonBossInfo const& /*info*/)
+    {
+        if (!bot || bot->GetMapId() != MAP)
+            return ObjectiveArriveResult::Done;
+        InstanceScript* inst = bot->GetInstanceScript();
+        if (!inst || inst->GetBossState(STATE_NIGHTBANE) != NOT_STARTED)
+            return ObjectiveArriveResult::Done;
+
+        Creature* nb = inst->GetCreature(static_cast<uint32>(STATE_NIGHTBANE));
+        if (!nb || nb->GetEntry() != NPC_NIGHTBANE || !nb->IsAlive() || nb->IsInEvadeMode())
+            return ObjectiveArriveResult::Running;
+
+        bool const onPerch = nb->GetExactDist(NB_PERCH_X, NB_PERCH_Y, NB_PERCH_Z) <= NB_PERCH_RADIUS;
+        if (!onPerch || nb->HasUnitState(UNIT_STATE_IGNORE_PATHFINDING))
+            return ObjectiveArriveResult::Done;
+
+        if (!nb->AI())
+            return ObjectiveArriveResult::Running;
+
+        LOG_INFO("playerbots.dungeonclear",
+                 "[DC:{}] Nightbane still on his perch after the urn click -> starting his intro",
+                 bot->GetName());
+        nb->AI()->DoAction(NB_ACTION_START_INTRO);
+        return ObjectiveArriveResult::Done;
+    }
+
     // Fires whenever the tank is in the pit; the condition going false is the only
     // "done", so a second fall re-arms it. The hook teleports, so steps own movement.
     // PanelAfterBoss, never PanelBeforeBoss: a Repeatable event never latches, so a
@@ -281,6 +327,7 @@ void RegisterKarazhanEvents(std::vector<DungeonEvent>& out)
 void RegisterKarazhanHooks(ObjectiveHookRegistry::HookTable& out)
 {
     ObjectiveHookRegistry::AddHook(out, DcKaraLibraryPit::HOOK_PIT_RESCUE, &RescueFromLibraryPit);
+    ObjectiveHookRegistry::AddHook(out, HOOK_KZ_NIGHTBANE_INTRO, &EnsureNightbaneIntro);
 }
 
 void RegisterKarazhanRoster(std::vector<BossRosterPatch>& t)
@@ -320,7 +367,7 @@ void RegisterKarazhanRoster(std::vector<BossRosterPatch>& t)
                              LANDING_X, LANDING_Y, LANDING_Z,
                              /*completionFrom*/ NPC_NIGHTBANE, ORDER_NIGHTBANE));
     // Chess: the Status Bar's row is removed above (a trigger that never dies);
-    // the objective owns the game and is finished while GetData(9) reads DONE.
+    // the objective owns the game and is finished while GetData(8) reads DONE.
     // Read live: the win is not saved, and after an instance reload the exit door
     // to Prince is shut again, so the game has to be played again.
     DungeonBossInfo chess = MakeObjective(OBJ(OBJ_CHESS), /*encounterIndex*/ BIT_CHESS, MAP,

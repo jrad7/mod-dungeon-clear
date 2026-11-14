@@ -64,7 +64,7 @@ export interface Dungeon {
   scenario?: boolean;
   scenarioOf?: string;
   focus?: number[];
-  success?: string;          // "instanceData(9)==3", "" = all-cleared only
+  success?: string;          // "instanceData(8)==3", "" = all-cleared only
   successGraceS?: number;
   overallTimeoutS?: number;  // 0 = the server's global budget
   noProgressS?: number;

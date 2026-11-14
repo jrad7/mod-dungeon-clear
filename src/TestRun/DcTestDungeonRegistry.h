@@ -37,7 +37,7 @@ namespace DcTestDungeonRegistry
     //                          success (every full-dungeon row, and a scenario
     //                          whose focus boss is a plain kill).
     //   InstanceDataEquals  -> InstanceScript::GetData(dataId) == value, e.g.
-    //                          Karazhan's DATA_CHESS_EVENT (9) reading DONE (3).
+    //                          Karazhan's DATA_CHESS_EVENT (8) reading DONE (3).
     struct SuccessPredicate
     {
         enum class Kind : std::uint8_t
@@ -75,7 +75,7 @@ namespace DcTestDungeonRegistry
         return false;
     }
 
-    // Stable token for logs / the record ("instanceData(9)==3"); "" when unset.
+    // Stable token for logs / the record ("instanceData(8)==3"); "" when unset.
     std::string DescribePredicate(SuccessPredicate const& p);
 
     struct Row

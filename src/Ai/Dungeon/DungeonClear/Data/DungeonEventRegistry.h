@@ -458,9 +458,9 @@ struct EventStep
     // why it exists. Their GetData overrides do not expose the boss state
     // (Opera's returns the play picked), so the data gates cannot express it.
     //
-    // The slot is authored from the instance header's DATA_* enum, which is NOT
-    // the DungeonEncounter bit index (Karazhan's Opera is slot 4, bit 3) — the
-    // same rule as DungeonBossInfo::doneBossStateIndex. -1 => no boss-state gate.
+    // The slot is authored from the instance header's DATA_* enum, which is not
+    // always the DungeonEncounter bit index (Drak'Tharon's Dred is bit 2, slot 3)
+    // — the same rule as DungeonBossInfo::doneBossStateIndex. -1 => no boss-state gate.
     int32  bossStateId{-1};
     uint32 bossStateClearMask{0};
     uint32 restartOnBossStateMask{0};
