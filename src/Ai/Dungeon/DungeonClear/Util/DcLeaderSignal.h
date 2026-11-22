@@ -26,14 +26,14 @@ public:
     // members would trail their own tank instead of one raid leader. The
     // candidate set is the alive tank BOTS on `reference`'s map (real-player
     // tanks are skipped — no PlayerbotAI to run the driving AI). A candidate
-    // that holds a run (its own DcRunState is enabled) wins, so the lead stays
-    // with the bot `dc on` reached. Otherwise the winner is chosen by group kind:
-    //   * Party (5-man): the lowest-GUID candidate.
-    //   * Raid: the candidate flagged Main Tank (MEMBER_FLAG_MAINTANK); with no MT
-    //     flagged (or the flagged member not an eligible tank bot), the candidate
-    //     with the highest equipped gear score, GUID-tiebroken — the most
-    //     survivable tank to hold raid-wide threat.
-    // Either way every member computes the same result (GetFirstMember walks the
+    // that holds a run wins, so the lead stays with the bot `dc on` reached.
+    // Otherwise the winner is mod-playerbots' main tank (PlayerbotAI::
+    // GetMainTankGuid: the member flagged Main Tank, else the first living tank
+    // in group order) when that is a candidate, so the playerbots raid
+    // strategies and dungeon clear agree on who tanks first; when it is not (a
+    // real player, a dead or non-tank member, or one on another map) the first
+    // candidate in group order.
+    // Every member computes the same result (GetFirstMember walks the
     // whole raid, not just a sub-group), so they all agree on whom to follow.
     // Returns nullptr when no tank bot is present on the map. `reference` may be
     // any group member: the issuing player, a follower, or a tank itself.
